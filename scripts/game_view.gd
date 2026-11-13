@@ -17,6 +17,11 @@ var names := {}
 var my_id := 0
 var t := 0.0
 var shake := 0.0
+var actions := {}    # id -> [animação, instante em que começou] (soltar bomba / arremessar)
+var death_t := {}    # id -> instante da morte
+var winner := 0      # vencedor da rodada (animação de comemoração)
+
+const ANIM_FPS := {"walk": 12.0, "place_bomb": 16.0, "throw": 18.0, "dizzy": 8.0, "death": 12.0, "victory": 6.0}
 
 
 func set_roster(list: Array) -> void:
@@ -31,6 +36,9 @@ func reset() -> void:
 	bdisp.clear()
 	players = []
 	bombs = []
+	actions.clear()
+	death_t.clear()
+	winner = 0
 
 
 func apply(s: Array) -> void:
@@ -42,9 +50,74 @@ func apply(s: Array) -> void:
 	has_data = true
 
 
-func on_event(kind: String, _data: Array) -> void:
-	if kind == "boom":
-		shake = maxf(shake, 0.12)
+func on_event(kind: String, data: Array) -> void:
+	match kind:
+		"boom":
+			shake = maxf(shake, 0.12)
+		"placed":
+			actions[data[0]] = ["place_bomb", t]
+		"punch":
+			actions[data[0]] = ["throw", t]
+		"death":
+			death_t[data[0]] = t
+
+
+## Escolhe o quadro da animação do jogador. Retorna null se não houver sprites (usa o bloco).
+func _player_frame(e: Array) -> Texture2D:
+	var id: int = e[0]
+	var bits: int = e[6]
+	var anim := ""
+	var elapsed := 0.0
+	var loop := true
+	if not e[3]:
+		anim = "death"
+		elapsed = t - float(death_t.get(id, -100.0))
+		loop = false
+	elif id == winner:
+		anim = "victory"
+		elapsed = t
+	elif actions.has(id) and t - float(actions[id][1]) < _anim_length(actions[id][0]):
+		anim = actions[id][0]
+		elapsed = t - float(actions[id][1])
+		loop = false
+	elif (bits & 2048) != 0:
+		anim = "walk_" + _dir_name(int(e[4]), int(e[5]))
+		elapsed = t
+	elif int(e[7]) != 0:
+		anim = "dizzy"
+		elapsed = t
+	else:
+		var idle: Array = Sprites.frames("walk_" + _dir_name(int(e[4]), int(e[5])))
+		return idle[0] if not idle.is_empty() else null
+	var list: Array = Sprites.frames(anim)
+	if list.is_empty():
+		return null
+	var fps: float = ANIM_FPS.get("walk" if anim.begins_with("walk_") else anim, 10.0)
+	var i := int(elapsed * fps)
+	if anim == "victory":
+		var n := list.size()
+		i = i % maxi(1, n * 2 - 2)
+		if i >= n:
+			i = n * 2 - 2 - i   # vai e volta
+	elif loop:
+		i = i % list.size()
+	else:
+		i = clampi(i, 0, list.size() - 1)
+	return list[i]
+
+
+func _anim_length(anim: String) -> float:
+	return Sprites.frames(anim).size() / float(ANIM_FPS.get(anim, 10.0))
+
+
+func _dir_name(fx: int, fy: int) -> String:
+	if fx > 0:
+		return "right"
+	if fx < 0:
+		return "left"
+	if fy < 0:
+		return "up"
+	return "down"
 
 
 func _process(dt: float) -> void:
@@ -146,22 +219,33 @@ func _draw() -> void:
 	var pcustom := Sprites.is_custom("player")
 	var font := ThemeDB.fallback_font
 	var sorted := players.duplicate()
-	sorted.sort_custom(func(a, b): return a[2] < b[2])
+	# mortos primeiro (ficam por baixo), depois os vivos de cima para baixo
+	sorted.sort_custom(func(a, b): return (not a[3]) if a[3] != b[3] else a[2] < b[2])
 	for e in sorted:
-		if not e[3]:
-			continue
 		var id: int = e[0]
+		var frame := _player_frame(e)
+		if not e[3] and frame == null:
+			continue   # sem sprites: morto some (como antes)
 		var pos: Vector2 = pdisp.get(id, Vector2(e[1], e[2]))
 		var center := pos * T
 		var r := Rect2(center - Vector2(T, T) * 0.5, Vector2(T, T))
 		var bits: int = e[6]
 		var col: Color = G.PLAYER_COLORS[int(colors.get(id, 0)) % G.PLAYER_COLORS.size()]
+		if not e[3]:
+			# corpo fica no chão, desbotando depois da animação de morte
+			var since := t - float(death_t.get(id, -100.0))
+			col.a = clampf(1.0 - (since - 0.7) * 0.5, 0.35, 1.0)
+			draw_texture_rect(frame, r, false, col)
+			continue
 		if int(e[7]) != 0 and int(t * 6.0) % 2 == 0:
 			col = col.lerp(Color(0.45, 1.0, 0.3), 0.6)
 		if (bits & 768) != 0 and int(t * 14.0) % 2 == 0:
 			col.a = 0.35
-		draw_texture_rect(ptex, r, false, col)
-		if not pcustom:
+		if frame != null:
+			draw_texture_rect(frame, r, false, col)
+		else:
+			draw_texture_rect(ptex, r, false, col)
+		if frame == null and not pcustom:
 			var f := Vector2(e[4], e[5])
 			var eye := center + f * 6.0
 			var side := Vector2(-f.y, f.x) * 5.0

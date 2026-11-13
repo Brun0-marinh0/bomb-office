@@ -16,6 +16,8 @@ const ServerGame = preload("res://scripts/server_game.gd")
 const GameView = preload("res://scripts/game_view.gd")
 const TouchControls = preload("res://scripts/touch_controls.gd")
 const ItemIcon = preload("res://scripts/item_icon.gd")
+const WinnerDisplay = preload("res://scripts/winner_display.gd")
+const WINNER_MSG_MAX := 20
 const SETTINGS_PATH := "user://settings.cfg"
 const ABILITY_NAMES := ["Chute", "Luva", "Remoto", "Perfurante", "Linha", "Super Bomba",
 	"Atravessa paredes", "Atravessa bombas"]
@@ -38,6 +40,7 @@ var test_mode := false
 var sim_speed := 1
 var share_url := ""
 var share_fixed := false
+var last_winner := 0       # vencedor da última rodada (pode mandar mensagem no modal)
 
 # ------------------------------------------------------------- estado do cliente
 var my_id := 0
@@ -82,6 +85,11 @@ var hud_stats: Label
 var hud_abort: Button
 var overlay: CenterContainer
 var overlay_label: Label
+var winner_disp: Control
+var score_label: Label
+var msg_row: HBoxContainer
+var msg_edit: LineEdit
+var cl_winner := 0
 var touch: Control
 var chips := {}
 var chip_ids: Array = []
@@ -114,11 +122,18 @@ func _ready() -> void:
 		_take_screenshot(str(args["screenshot"]), float(args.get("shot-delay", "5")))
 
 
+## Teste: --screenshot=arquivo.png --shot-delay=5 [--shot-count=4 --shot-interval=1.5]
 func _take_screenshot(path: String, delay: float) -> void:
+	var count := maxi(1, int(args.get("shot-count", "1")))
+	var interval := float(args.get("shot-interval", "1.0"))
 	await get_tree().create_timer(delay).timeout
-	await RenderingServer.frame_post_draw
-	get_viewport().get_texture().get_image().save_png(path)
-	print("[teste] captura salva em %s" % path)
+	for i in count:
+		await RenderingServer.frame_post_draw
+		var out := path if count == 1 else path.get_basename() + "_%d.png" % i
+		get_viewport().get_texture().get_image().save_png(out)
+		print("[teste] captura salva em %s" % out)
+		if i < count - 1:
+			await get_tree().create_timer(interval).timeout
 	get_tree().quit(0)
 
 
@@ -416,10 +431,18 @@ func _on_round_over(winner: int) -> void:
 	var wname: String = lobby[winner].name if lobby.has(winner) else "?"
 	print("[servidor] rodada %d: %s" % [round_no, ("vitória de " + wname) if winner != 0 else "empate"])
 	var w := _wins_for(roster)
+	last_winner = winner
 	_broadcast(&"rpc_snapshot", [sim.snapshot()])
 	_broadcast(&"rpc_round_end", [winner, w])
 	var champion := winner != 0 and int(wins[winner]) >= cfg_wins
-	await get_tree().create_timer(4.0 / sim_speed).timeout
+	# vencedor humano ganha mais tempo para escrever a mensagem
+	var human_winner: bool = lobby.has(winner) and not lobby[winner].bot
+	var wait := 4.0
+	if champion:
+		wait = 3.0
+	elif human_winner:
+		wait = 9.0
+	await get_tree().create_timer(wait / sim_speed).timeout
 	if state != "round_end":
 		return
 	if test_mode and (champion or round_no >= 20):
@@ -432,7 +455,7 @@ func _on_round_over(winner: int) -> void:
 	state = "match_end"
 	print("[servidor] CAMPEÃO: %s" % wname)
 	_broadcast(&"rpc_match_end", [winner, w])
-	await get_tree().create_timer(7.0).timeout
+	await get_tree().create_timer(12.0 if human_winner else 7.0).timeout
 	if state == "match_end":
 		_back_to_lobby()
 
@@ -486,6 +509,23 @@ func rpc_start() -> void:
 
 
 @rpc("any_peer", "reliable")
+func rpc_winner_msg(text: String) -> void:
+	if not Net.is_server or (state != "round_end" and state != "match_end"):
+		return
+	var id := _sender()
+	if id != last_winner or not lobby.has(id) or lobby[id].bot:
+		return
+	var clean := ""
+	for ch in text.strip_edges():
+		if ch.unicode_at(0) >= 32:
+			clean += ch
+	clean = clean.substr(0, WINNER_MSG_MAX).strip_edges().to_upper()
+	if clean != "":
+		print("[servidor] mensagem do vencedor %s: %s" % [lobby[id].name, clean])
+		_broadcast(&"rpc_winner_text", [id, clean])
+
+
+@rpc("any_peer", "reliable")
 func rpc_close_room() -> void:
 	if Net.is_server and _sender() == _leader() and state == "lobby":
 		_close_room()
@@ -535,7 +575,8 @@ func rpc_lobby(list: Array, leader: int, st: String, w: int, t: int, share: Stri
 		_show("game")
 		_show_overlay("Partida em andamento.\nVocê entra na próxima!", 3.0)
 	_refresh_lobby()
-	if args.has("autostart") and not auto_started and leader == my_id and st == "lobby":
+	if args.has("autostart") and not auto_started and leader == my_id and st == "lobby" \
+			and list.size() >= int(args.get("autostart-min", "1")):
 		auto_started = true
 		for i in int(args.get("addbots", "0")):
 			_to_server(&"rpc_bots", [true])
@@ -575,6 +616,9 @@ func rpc_round_start(n: int, ids: Array, w: Dictionary) -> void:
 	_show_overlay(txt, 2.0)
 	if args.has("autojoin"):
 		print("[cliente] rodada %d começou" % n)
+	if args.has("test-suicide"):   # teste: solta uma bomba e fica parado
+		await get_tree().create_timer(1.0).timeout
+		_to_server(&"rpc_bomb")
 
 
 @rpc("authority", "unreliable_ordered")
@@ -604,10 +648,25 @@ func rpc_round_end(winner: int, w: Dictionary) -> void:
 	if Net.is_dedicated or view == null:
 		return
 	cl_wins = w
+	view.winner = winner
 	var title := "EMPATE!" if winner == 0 else "%s venceu a rodada!" % _name_of(winner)
-	_show_overlay(title + "\n\n" + _scoreboard(w), 0.0)
+	_show_winner_overlay(winner, title, w)
 	if args.has("autojoin"):
 		print("[cliente] fim da rodada: %s (snapshots recebidos: %d)" % [title, _snap_count])
+	if args.has("winner-msg") and winner == my_id:   # teste: escreve a mensagem sozinho
+		await get_tree().create_timer(1.0).timeout
+		msg_edit.text = str(args["winner-msg"])
+		_send_winner_msg()
+
+
+@rpc("authority", "reliable")
+func rpc_winner_text(winner: int, text: String) -> void:
+	if Net.is_dedicated or view == null:
+		return
+	if winner_disp.visible and cl_winner == winner:
+		winner_disp.message = text
+	if args.has("autojoin"):
+		print("[cliente] mensagem do vencedor recebida: %s" % text)
 
 
 @rpc("authority", "reliable")
@@ -615,7 +674,8 @@ func rpc_match_end(winner: int, w: Dictionary) -> void:
 	if Net.is_dedicated or view == null:
 		return
 	cl_wins = w
-	_show_overlay("%s É O CAMPEÃO!\n\n%s" % [_name_of(winner).to_upper(), _scoreboard(w)], 0.0)
+	view.winner = winner
+	_show_winner_overlay(winner, "%s É O CAMPEÃO!" % _name_of(winner).to_upper(), w)
 	if args.has("autojoin"):
 		print("[cliente] campeão: %s" % _name_of(winner))
 		if args.has("autoquit"):
@@ -1031,9 +1091,30 @@ func _build_overlay() -> void:
 	sb.set_content_margin_all(24)
 	panel.add_theme_stylebox_override("panel", sb)
 	overlay.add_child(panel)
+	var vb := VBoxContainer.new()
+	vb.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	vb.add_theme_constant_override("separation", 12)
+	panel.add_child(vb)
 	overlay_label = _label("", 28)
 	overlay_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	panel.add_child(overlay_label)
+	vb.add_child(overlay_label)
+	winner_disp = WinnerDisplay.new()
+	winner_disp.visible = false
+	vb.add_child(winner_disp)
+	score_label = _label("", 20)
+	score_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	score_label.visible = false
+	vb.add_child(score_label)
+	msg_row = HBoxContainer.new()
+	msg_row.visible = false
+	msg_edit = LineEdit.new()
+	msg_edit.max_length = WINNER_MSG_MAX
+	msg_edit.placeholder_text = "Escreva algo para todos (Enter)"
+	msg_edit.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	msg_edit.text_submitted.connect(func(_t): _send_winner_msg())
+	msg_row.add_child(msg_edit)
+	msg_row.add_child(_button("Enviar", _send_winner_msg, 16))
+	vb.add_child(msg_row)
 
 
 func _show(which: String) -> void:
@@ -1047,9 +1128,49 @@ func _show(which: String) -> void:
 		dir_stack.clear()
 
 
+## Modal de vitória: sprite do vencedor + placar; o vencedor humano pode mandar uma mensagem.
+func _show_winner_overlay(winner: int, title: String, w: Dictionary) -> void:
+	var same_winner := winner_disp.visible and cl_winner == winner
+	_show_overlay(title, 0.0)
+	score_label.text = _scoreboard(w)
+	score_label.visible = true
+	if winner == 0:
+		return
+	var keep_msg: String = winner_disp.message if same_winner else ""
+	winner_disp.show_winner(G.PLAYER_COLORS[_color_of(winner)])
+	winner_disp.message = keep_msg
+	winner_disp.visible = true
+	cl_winner = winner
+	var can_write := winner == my_id and not _is_bot(winner)
+	msg_row.visible = can_write
+	if can_write:
+		if not same_winner:
+			msg_edit.text = ""
+		dir_stack.clear()
+		msg_edit.grab_focus()
+
+
+func _send_winner_msg() -> void:
+	var txt := msg_edit.text.strip_edges()
+	if txt == "":
+		return
+	_to_server(&"rpc_winner_msg", [txt])
+	msg_edit.text = ""
+
+
+func _is_bot(id: int) -> bool:
+	for e in cl_players:
+		if e[0] == id:
+			return e[3]
+	return id < 0
+
+
 func _show_overlay(text: String, secs: float) -> void:
 	overlay_label.text = text
 	overlay.visible = true
+	winner_disp.visible = false
+	score_label.visible = false
+	msg_row.visible = false
 	_overlay_token += 1
 	var tok := _overlay_token
 	if secs > 0.0:

@@ -122,6 +122,8 @@ numa VPS com TLS (`--cert=fullchain.pem --key=privkey.pem` ativa `wss://`). O li
 - Ao morrer, os itens coletados se espalham pela arena.
 - **Morte súbita:** no último minuto, blocos caem em espiral de fora para dentro e esmagam quem estiver embaixo.
 - Rodada termina quando sobra 1 (vitória) ou 0 (empate); quem chegar a N vitórias (padrão 3) é o campeão.
+- No modal de vitória aparece o vencedor comemorando. Se for um jogador (não bot), ele pode escrever uma
+  mensagem de até 20 caracteres (Enter), que aparece para todos acima do personagem, em maiúsculas, com onda e arco-íris.
 - O líder do lobby (primeiro a entrar) escolhe vitórias, tempo da rodada, adiciona bots e inicia/encerra a partida.
 
 ### Itens
