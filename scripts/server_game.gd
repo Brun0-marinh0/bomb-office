@@ -72,7 +72,7 @@ func _new_player(r: Dictionary, spawn: Vector2i) -> Dictionary:
 		"power": false, "wall_pass": false, "bomb_pass": false,
 		"vest_t": 0.0, "hearts": 0, "invuln_t": 0.0,
 		"disease": G.D_NONE, "disease_t": 0.0,
-		"collected": [], "ai_path": [], "ai_timer": 0.0,
+		"collected": [], "ai_path": [], "ai_timer": 0.0, "moving": false,
 	}
 
 
@@ -192,11 +192,13 @@ func _passable(p: Dictionary, c: Vector2i) -> bool:
 ## Movimento em grade com "assistência de curva": o jogador escorrega para o
 ## corredor quando aperta a direção um pouco desalinhado.
 func _move_player(p: Dictionary, dt: float) -> void:
+	p.moving = false
 	var d: Vector2i = p.dir
 	if p.disease == G.D_REVERSE:
 		d = -d
 	if d == Vector2i.ZERO:
 		return
+	var start_pos: Vector2 = p.pos
 	p.facing = d
 	var step := _speed(p) * dt
 	var pos: Vector2 = p.pos
@@ -229,6 +231,7 @@ func _move_player(p: Dictionary, dt: float) -> void:
 	if nalong > 0.0 and not _passable(p, ncell + d):
 		pos -= axis * nalong
 	p.pos = pos
+	p.moving = pos.distance_squared_to(start_pos) > 0.000001
 
 
 func _overlaps(a: Vector2, b: Vector2) -> bool:
@@ -271,14 +274,16 @@ func _try_place_bomb(p: Dictionary, allow_line: bool) -> void:
 		return
 	var cell: Vector2i = G.cell_of(p.pos)
 	if _bomb_at(cell) != null:
-		if allow_line and p.line:
+		if allow_line and p.line and _count_bombs(p.id) < p.bombs_max:
 			_place_line(p, cell)
+			game_event.emit("placed", [p.id])
 		return
 	if tiles[G.idx(cell)] != G.T_EMPTY:
 		return
 	if _count_bombs(p.id) >= p.bombs_max:
 		return
 	_spawn_bomb(p, cell)
+	game_event.emit("placed", [p.id])
 
 
 func _spawn_bomb(p: Dictionary, cell: Vector2i) -> void:
@@ -326,6 +331,7 @@ func _do_action(p: Dictionary) -> void:
 			b = _bomb_at(here)
 		if b != null:
 			_launch(b, p.facing, G.PUNCH_DIST)
+			game_event.emit("punch", [p.id])
 			return
 	if p.remote:
 		for b in bombs:
@@ -709,6 +715,7 @@ func _bits(p: Dictionary) -> int:
 	if p.vest_t > 0.0: b |= 256
 	if p.invuln_t > 0.0: b |= 512
 	if p.hearts > 0: b |= 1024
+	if p.moving: b |= 2048
 	return b
 
 

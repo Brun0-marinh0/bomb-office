@@ -27,6 +27,24 @@ func tex(key: String) -> Texture2D:
 	return t
 
 
+## Quadros de uma animação do jogador: assets/sprites/player/<anim>/frame_01.png, frame_02.png...
+## Retorna [] se a pasta não existir (o jogo volta a desenhar o bloco).
+func frames(anim: String) -> Array:
+	var key := "anim:" + anim
+	if _cache.has(key):
+		return _cache[key]
+	var list: Array = []
+	var i := 1
+	while true:
+		var path := "%splayer/%s/frame_%02d.png" % [SPRITE_DIR, anim, i]
+		if not ResourceLoader.exists(path):
+			break
+		list.append(load(path))
+		i += 1
+	_cache[key] = list
+	return list
+
+
 func is_custom(key: String) -> bool:
 	if not _cache.has(key):
 		tex(key)
