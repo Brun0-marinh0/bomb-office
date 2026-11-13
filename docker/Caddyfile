@@ -1,0 +1,15 @@
+# HTTPS automático (Let's Encrypt) para publicar numa VPS com domínio.
+# Usado só com: docker compose --profile https up -d
+{$DOMAIN} {
+	encode zstd gzip
+
+	# conexão do jogo (wss://DOMINIO/ws)
+	handle /ws* {
+		reverse_proxy game:9080
+	}
+
+	# páginas e arquivos do jogo
+	handle {
+		reverse_proxy web:80
+	}
+}

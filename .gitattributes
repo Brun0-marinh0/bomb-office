@@ -1,0 +1,9 @@
+# Mantém LF no repositório (Dockerfile, nginx.conf e scripts quebram com CRLF no Linux)
+* text=auto eol=lf
+*.ps1 text eol=crlf
+*.bat text eol=crlf
+
+*.png binary
+*.jpg binary
+*.wav binary
+*.ogg binary

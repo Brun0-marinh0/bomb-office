@@ -1,0 +1,53 @@
+# BombOffice — configure em .env (copie de .env.example)
+#
+# Rede local:            docker compose up -d --build
+# VPS com domínio/HTTPS: docker compose --profile https up -d --build
+name: bomboffice
+
+services:
+  game:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      target: server
+      args:
+        GODOT_VERSION: ${GODOT_VERSION:-4.3}
+    image: bomboffice-game
+    init: true
+    restart: unless-stopped
+    command: ["--port=9080", "--share-url=${SHARE_URL:-}"]
+    ports:
+      - "${GAME_PORT:-9080}:9080"
+
+  web:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      target: web
+      args:
+        GODOT_VERSION: ${GODOT_VERSION:-4.3}
+    image: bomboffice-web
+    restart: unless-stopped
+    ports:
+      - "${WEB_PORT:-8060}:80"
+
+  caddy:
+    image: caddy:2-alpine
+    profiles: ["https"]
+    restart: unless-stopped
+    environment:
+      DOMAIN: ${DOMAIN:-localhost}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./docker/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - game
+      - web
+
+volumes:
+  caddy_data:
+  caddy_config:

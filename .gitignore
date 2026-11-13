@@ -1,0 +1,6 @@
+.godot/
+build/
+*.tmp
+
+# configuração local (copie de .env.example)
+.env

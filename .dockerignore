@@ -1,0 +1,6 @@
+.godot/
+build/
+.git/
+.env
+.env.*
+*.tmp
