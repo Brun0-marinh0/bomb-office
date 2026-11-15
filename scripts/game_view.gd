@@ -21,6 +21,10 @@ var actions := {}    # id -> [animação, instante em que começou] (soltar bomb
 var death_t := {}    # id -> instante da morte
 var winner := 0      # vencedor da rodada (animação de comemoração)
 
+## Decoração da parede de cima (assets/sprites/officeWall/); colunas sem entrada usam wall_plain.
+const WALL_DECOR := {3: "wall_notice_board", 5: "wall_air_conditioner", 8: "wall_clock", 11: "wall_air_conditioner", 13: "wall_notice_board"}
+
+const SOFT_FPS := 10.0  # animação da mesa (bloco destrutível), assets/sprites/deskOffice/
 const ANIM_FPS := {"walk": 12.0, "place_bomb": 16.0, "throw": 18.0, "dizzy": 8.0, "death": 12.0, "victory": 6.0}
 
 
@@ -146,6 +150,28 @@ func _process(dt: float) -> void:
 	queue_redraw()
 
 
+func _is_edge(x: int, y: int) -> bool:
+	return x == 0 or y == 0 or x == G.W - 1 or y == G.H - 1
+
+
+## Borda do escritório: parede alta em cima (com decorações), parede fina nos lados e embaixo.
+## As partes transparentes dos sprites deixam ver o fundo, fora da sala.
+func _draw_wall(x: int, y: int, r: Rect2) -> void:
+	if y == 0 or y == G.H - 1:
+		var tex := Sprites.tex("officeWall/" + (WALL_DECOR.get(x, "wall_plain") if y == 0 else "wall_bottom"))
+		# nos cantos só o pedaço que encontra a parede lateral (que tem 7 px de espessura)
+		if x == 0:
+			draw_texture_rect_region(tex, Rect2(r.position + Vector2(25, 0), Vector2(7, 32)), Rect2(25, 0, 7, 32))
+		elif x == G.W - 1:
+			draw_texture_rect_region(tex, Rect2(r.position, Vector2(7, 32)), Rect2(0, 0, 7, 32))
+		else:
+			draw_texture_rect(tex, r, false)
+	elif x == 0:
+		draw_texture_rect(Sprites.tex("officeWall/wall_left"), r, false)
+	else:
+		draw_texture_rect(Sprites.tex("officeWall/wall_right"), r, false)
+
+
 func _draw() -> void:
 	if not has_data:
 		return
@@ -157,7 +183,9 @@ func _draw() -> void:
 	var hard := Sprites.tex("hard")
 	var fallen := Sprites.tex("fallen")
 	var soft := Sprites.tex("soft")
+	var soft_anim: Array = Sprites.seq("deskOffice/deskOffice_")
 	var flame := Sprites.tex("flame")
+	var use_wall := Sprites.is_custom("officeWall/wall_plain")
 
 	# ---- arena
 	for y in G.H:
@@ -165,16 +193,23 @@ func _draw() -> void:
 			var k := y * G.W + x
 			var r := Rect2(x * T, y * T, T, T)
 			var tt: int = tiles[k]
-			if tt == G.T_HARD:
+			if tt == G.T_HARD and use_wall and _is_edge(x, y):
+				_draw_wall(x, y, r)
+			elif tt == G.T_HARD:
 				draw_texture_rect(hard, r, false)
 			elif tt == G.T_FALLEN:
 				draw_texture_rect(fallen, r, false)
 			else:
 				draw_texture_rect(floor_a if (x + y) % 2 == 0 else floor_b, r, false)
+				var st: Texture2D = soft
+				if not soft_anim.is_empty():
+					# cada mesa começa num quadro diferente para não piscarem todas juntas
+					var f := int(t * SOFT_FPS + (x * 7 + y * 13)) % soft_anim.size()
+					st = soft_anim[f]
 				if tt == G.T_SOFT:
-					draw_texture_rect(soft, r, false)
+					draw_texture_rect(st, r, false)
 				elif tt == G.T_BURNING:
-					draw_texture_rect(soft, r, false, Color(1.0, 0.45 + 0.3 * sin(t * 40.0), 0.2))
+					draw_texture_rect(st, r, false, Color(1.0, 0.45 + 0.3 * sin(t * 40.0), 0.2))
 				elif items[k] != 0:
 					Sprites.draw_item(self, items[k], r)
 
