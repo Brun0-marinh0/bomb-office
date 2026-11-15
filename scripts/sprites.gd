@@ -30,13 +30,19 @@ func tex(key: String) -> Texture2D:
 ## Quadros de uma animação do jogador: assets/sprites/player/<anim>/frame_01.png, frame_02.png...
 ## Retorna [] se a pasta não existir (o jogo volta a desenhar o bloco).
 func frames(anim: String) -> Array:
-	var key := "anim:" + anim
+	return seq("player/%s/frame_" % anim)
+
+
+## Sequência numerada qualquer: seq("deskOffice/deskOffice_") carrega
+## assets/sprites/deskOffice/deskOffice_01.png, _02.png... até não achar o próximo.
+func seq(prefix: String) -> Array:
+	var key := "seq:" + prefix
 	if _cache.has(key):
 		return _cache[key]
 	var list: Array = []
 	var i := 1
 	while true:
-		var path := "%splayer/%s/frame_%02d.png" % [SPRITE_DIR, anim, i]
+		var path := "%s%s%02d.png" % [SPRITE_DIR, prefix, i]
 		if not ResourceLoader.exists(path):
 			break
 		list.append(load(path))

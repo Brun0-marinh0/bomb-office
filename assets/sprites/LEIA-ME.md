@@ -29,7 +29,7 @@ As velocidades ficam em `ANIM_FPS`, em `scripts/game_view.gd`.
 |---|---|
 | `floor.png` / `floor_alt.png` | Chão (alternado em xadrez) |
 | `hard.png` | Bloco indestrutível (bordas e pilares) |
-| `soft.png` | Bloco destrutível |
+| `soft.png` | Bloco destrutível (só se `deskOffice/` não existir) |
 | `fallen.png` | Bloco que cai na morte súbita |
 | `bomb.png` | Bomba |
 | `flame.png` | Fogo da explosão |
@@ -48,3 +48,25 @@ As velocidades ficam em `ANIM_FPS`, em `scripts/game_view.gd`.
 | `item_vest.png` | Colete |
 | `item_heart.png` | Coração |
 | `item_skull.png` | Caveira |
+
+## Bloco destrutível animado — `deskOffice/deskOffice_01.png ... deskOffice_14.png`
+
+Quando a pasta existe, a mesa substitui o `soft.png` e toca em loop (velocidade em `SOFT_FPS`,
+em `scripts/game_view.gd`). Cada mesa começa num quadro diferente. Pode ter qualquer quantidade de quadros.
+
+## Borda do escritório — `officeWall/`
+
+Quando `officeWall/wall_plain.png` existe, a borda da arena usa estes sprites no lugar do `hard.png`
+(os pilares do meio continuam com `hard.png`). Partes transparentes mostram o fundo, fora da sala.
+
+| Arquivo | Onde |
+|---|---|
+| `wall_plain.png` | Parede de cima, sem decoração |
+| `wall_clock.png` | Parede de cima com relógio (só um, no meio) |
+| `wall_air_conditioner.png` | Parede de cima com ar-condicionado |
+| `wall_notice_board.png` | Parede de cima com quadro de avisos |
+| `wall_left.png` | Parede da esquerda (faixa no lado direito do tile) |
+| `wall_right.png` | Parede da direita (faixa no lado esquerdo do tile) |
+| `wall_bottom.png` | Parede de baixo (faixa no topo do tile) |
+
+A posição de cada decoração na parede de cima fica em `WALL_DECOR`, em `scripts/game_view.gd`.
