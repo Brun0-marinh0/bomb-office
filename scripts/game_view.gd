@@ -27,6 +27,24 @@ const WALL_DECOR := {3: "wall_notice_board", 5: "wall_air_conditioner", 8: "wall
 const SOFT_FPS := 10.0  # animação da mesa (bloco destrutível), assets/sprites/deskOffice/
 const ANIM_FPS := {"walk": 12.0, "place_bomb": 16.0, "throw": 18.0, "dizzy": 8.0, "death": 12.0, "victory": 6.0}
 
+## Efeitos sonoros (assets/sounds/). Se o arquivo não existir, o jogo segue sem som.
+const SFX_EXPLOSION := "res://assets/sounds/explosion/boom.mp3"
+var sfx_boom: AudioStreamPlayer
+
+
+func _ready() -> void:
+	sfx_boom = AudioStreamPlayer.new()
+	sfx_boom.max_polyphony = 8  # explosões em cadeia tocam sobrepostas
+	sfx_boom.bus = "Efeitos"   # volume ajustado em Configurações (settings_menu.gd)
+	if ResourceLoader.exists(SFX_EXPLOSION):
+		sfx_boom.stream = load(SFX_EXPLOSION)
+	add_child(sfx_boom)
+
+
+func play_boom() -> void:
+	if sfx_boom.stream != null:
+		sfx_boom.play()
+
 
 func set_roster(list: Array) -> void:
 	for e in list:
@@ -58,6 +76,7 @@ func on_event(kind: String, data: Array) -> void:
 	match kind:
 		"boom":
 			shake = maxf(shake, 0.12)
+			play_boom()
 		"placed":
 			actions[data[0]] = ["place_bomb", t]
 		"punch":

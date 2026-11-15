@@ -4,3 +4,6 @@ build/
 
 # configuração local (copie de .env.example)
 .env
+
+# músicas originais em WAV (pesadas); o jogo usa as versões .ogg
+assets/sounds/intro/*.wav
