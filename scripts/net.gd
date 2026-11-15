@@ -88,3 +88,55 @@ func page_url() -> String:
 		if href is String:
 			return href
 	return ""
+
+
+# ------------------------------------------------------------- tela cheia (celular)
+## Celular/tablet: tela de toque. Usado para mostrar os controles e o botão de tela cheia.
+func is_touch() -> bool:
+	return DisplayServer.is_touchscreen_available()
+
+
+## O navegador permite tela cheia na página? (iPhone não permite; lá use "Adicionar à Tela de Início")
+func fullscreen_supported() -> bool:
+	if not OS.has_feature("web"):
+		return false
+	# (o eval do Godot 4.3 devolve null para booleanos do JS, por isso 1/0)
+	return int(JavaScriptBridge.eval("(document.fullscreenEnabled || document.webkitFullscreenEnabled) ? 1 : 0", true)) == 1
+
+
+func is_fullscreen() -> bool:
+	if not OS.has_feature("web"):
+		return DisplayServer.window_get_mode() == DisplayServer.WINDOW_MODE_FULLSCREEN
+	return int(JavaScriptBridge.eval("(document.fullscreenElement || document.webkitFullscreenElement) ? 1 : 0", true)) == 1
+
+
+## Precisa ser chamado logo após um toque/clique do jogador (regra do navegador).
+## Em tela cheia também trava a tela na horizontal, quando o celular deixa.
+func set_fullscreen(on: bool) -> void:
+	if not OS.has_feature("web"):
+		DisplayServer.window_set_mode(DisplayServer.WINDOW_MODE_FULLSCREEN if on
+			else DisplayServer.WINDOW_MODE_WINDOWED)
+		return
+	var js := """
+		(function (on) {
+			var d = document, el = d.documentElement;
+			try {
+				if (on) {
+					if (d.fullscreenElement || d.webkitFullscreenElement) return;
+					var req = el.requestFullscreen || el.webkitRequestFullscreen;
+					if (!req) return;
+					var p = req.call(el, { navigationUI: 'hide' });
+					var lock = function () {
+						if (screen.orientation && screen.orientation.lock)
+							screen.orientation.lock('landscape').catch(function () {});
+					};
+					if (p && p.then) p.then(lock).catch(function () {}); else lock();
+				} else {
+					if (!(d.fullscreenElement || d.webkitFullscreenElement)) return;
+					var ex = d.exitFullscreen || d.webkitExitFullscreen;
+					if (ex) { var q = ex.call(d); if (q && q.catch) q.catch(function () {}); }
+				}
+			} catch (e) {}
+		})(%s);
+	""" % ("true" if on else "false")
+	JavaScriptBridge.eval(js, true)

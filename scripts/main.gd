@@ -15,6 +15,7 @@ const G = preload("res://scripts/g.gd")
 const ServerGame = preload("res://scripts/server_game.gd")
 const GameView = preload("res://scripts/game_view.gd")
 const TouchControls = preload("res://scripts/touch_controls.gd")
+const FullscreenButton = preload("res://scripts/fullscreen_button.gd")
 const ItemIcon = preload("res://scripts/item_icon.gd")
 const WinnerDisplay = preload("res://scripts/winner_display.gd")
 const WINNER_MSG_MAX := 20
@@ -91,6 +92,8 @@ var msg_row: HBoxContainer
 var msg_edit: LineEdit
 var cl_winner := 0
 var touch: Control
+var fs_btn: Button
+var show_fs := false        # celular com tela cheia disponível (Android)
 var chips := {}
 var chip_ids: Array = []
 var _overlay_token := 0
@@ -724,6 +727,8 @@ func _on_server_disconnected() -> void:
 
 
 func _on_join_pressed() -> void:
+	if show_fs:
+		Net.set_fullscreen(true)   # celular: some a barra de endereço ao entrar
 	player_name = _clean_name(name_edit.text)
 	_save_settings()
 	_connect_to(url_edit.text.strip_edges())
@@ -892,6 +897,7 @@ func _build_ui() -> void:
 	th.default_font_size = 18
 	ui.theme = th
 	layer.add_child(ui)
+	show_fs = Net.is_touch() and Net.fullscreen_supported()
 	_build_menu()
 	_build_lobby()
 	_build_hud()
@@ -901,6 +907,14 @@ func _build_ui() -> void:
 	ui.add_child(touch)
 	touch.bomb_pressed.connect(func(): _to_server(&"rpc_bomb"))
 	touch.action_pressed.connect(func(): _to_server(&"rpc_action"))
+	fs_btn = FullscreenButton.new()
+	fs_btn.set_anchors_and_offsets_preset(Control.PRESET_TOP_RIGHT)
+	fs_btn.offset_left = -FullscreenButton.SIZE - 10
+	fs_btn.offset_right = -10
+	fs_btn.offset_top = 8
+	fs_btn.offset_bottom = 8 + FullscreenButton.SIZE
+	fs_btn.visible = show_fs
+	ui.add_child(fs_btn)
 
 
 func _build_menu() -> void:
@@ -945,7 +959,7 @@ func _build_menu() -> void:
 	status_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	status_label.custom_minimum_size.x = 420
 	vb.add_child(status_label)
-	var help := _label("Teclado: Setas/WASD movem • Espaço solta bomba • Shift/E ação\nCelular: analógico à esquerda, botões à direita", 13)
+	var help := _label("Teclado: Setas/WASD movem • Espaço solta bomba • Shift/E ação\nCelular: direcional à esquerda, botões à direita", 13)
 	help.modulate = Color(1, 1, 1, 0.6)
 	vb.add_child(help)
 
@@ -1053,7 +1067,7 @@ func _build_hud() -> void:
 	var top := HBoxContainer.new()
 	top.set_anchors_and_offsets_preset(Control.PRESET_TOP_WIDE)
 	top.offset_left = 12
-	top.offset_right = -12
+	top.offset_right = -12 - (FullscreenButton.SIZE + 10 if show_fs else 0)
 	top.offset_bottom = 46
 	top.add_theme_constant_override("separation", 16)
 	hud.add_child(top)
