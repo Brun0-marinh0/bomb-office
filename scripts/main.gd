@@ -16,6 +16,8 @@ const ServerGame = preload("res://scripts/server_game.gd")
 const GameView = preload("res://scripts/game_view.gd")
 const TouchControls = preload("res://scripts/touch_controls.gd")
 const FullscreenButton = preload("res://scripts/fullscreen_button.gd")
+const Music = preload("res://scripts/music.gd")
+const SettingsMenu = preload("res://scripts/settings_menu.gd")
 const ItemIcon = preload("res://scripts/item_icon.gd")
 const WinnerDisplay = preload("res://scripts/winner_display.gd")
 const WINNER_MSG_MAX := 20
@@ -93,6 +95,11 @@ var msg_edit: LineEdit
 var cl_winner := 0
 var touch: Control
 var fs_btn: Button
+var music: Node
+var settings: Control
+var gear_btn: Button
+var music_vol := 0.8
+var sfx_vol := 0.8
 var show_fs := false        # celular com tela cheia disponível (Android)
 var chips := {}
 var chip_ids: Array = []
@@ -112,10 +119,15 @@ func _ready() -> void:
 		_start_dedicated()
 		return
 	RenderingServer.set_default_clear_color(Color(0.07, 0.08, 0.11))
+	SettingsMenu.setup_buses()
 	_load_settings()
+	SettingsMenu.apply_volumes(music_vol, sfx_vol)
 	view = GameView.new()
 	view.visible = false
 	add_child(view)
+	music = Music.new()
+	add_child(music)
+	music.player.bus = SettingsMenu.BUS_MUSIC
 	_build_ui()
 	_show("menu")
 	if args.has("autojoin"):
@@ -810,6 +822,8 @@ func _key_dir(k: int) -> Vector2i:
 
 
 func _unhandled_input(event: InputEvent) -> void:
+	if settings != null and settings.visible:
+		return   # painel de configurações aberto: teclado não controla o jogador
 	if screen != "game":
 		return
 	if event is InputEventKey and not event.echo:
@@ -915,111 +929,215 @@ func _build_ui() -> void:
 	fs_btn.offset_bottom = 8 + FullscreenButton.SIZE
 	fs_btn.visible = show_fs
 	ui.add_child(fs_btn)
+	# engrenagem: volume da música e dos efeitos (fica à esquerda do botão de tela cheia)
+	var gs: float = SettingsMenu.GearButton.SIZE
+	var right := -10.0 - (FullscreenButton.SIZE + 10.0 if show_fs else 0.0)
+	gear_btn = SettingsMenu.GearButton.new()
+	gear_btn.set_anchors_and_offsets_preset(Control.PRESET_TOP_RIGHT)
+	gear_btn.offset_left = right - gs
+	gear_btn.offset_right = right
+	gear_btn.offset_top = 8
+	gear_btn.offset_bottom = 8 + gs
+	ui.add_child(gear_btn)
+	settings = SettingsMenu.new()
+	settings.music_vol = music_vol
+	settings.sfx_vol = sfx_vol
+	settings.test_sfx = func(): view.play_boom()
+	ui.add_child(settings)
+	gear_btn.pressed.connect(settings.open)
+	settings.visibility_changed.connect(func():
+		# com o painel aberto, os controles de toque não podem mover o jogador
+		touch.visible = screen == "game" and DisplayServer.is_touchscreen_available() and not settings.visible)
+	settings.changed.connect(func(m: float, f: float):
+		music_vol = m
+		sfx_vol = f
+		_save_settings())
 
 
 func _build_menu() -> void:
-	var r := _make_panel(460)
-	screens["menu"] = r[0]
-	var vb: VBoxContainer = r[1]
-	var title := _label("BOMB OFFICE", 44)
-	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	# visual neon anos 80: fundo animado, título que balança, botões de texto (scripts/menu_style.gd)
+	var root := Control.new()
+	root.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	root.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	ui.add_child(root)
+	screens["menu"] = root
+	root.add_child(MenuStyle.Background.new())
+	var center := CenterContainer.new()
+	center.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	center.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	root.add_child(center)
+	var vb := VBoxContainer.new()
+	vb.add_theme_constant_override("separation", 12)
+	vb.alignment = BoxContainer.ALIGNMENT_CENTER
+	center.add_child(vb)
+	var title := MenuStyle.Title.new()
+	title.custom_minimum_size.x = 900
 	vb.add_child(title)
-	var sub := _label("Batalha de bombas online • 2 a 8 jogadores", 15)
+	var sub := Label.new()
+	sub.text = "BATALHA DE BOMBAS ONLINE  •  2 A 8 JOGADORES"
 	sub.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	sub.modulate = Color(1, 1, 1, 0.7)
+	MenuStyle.style_label(sub, 20, MenuStyle.CYAN)
 	vb.add_child(sub)
-	vb.add_child(_label("Seu nome:"))
+	var gap := Control.new()
+	gap.custom_minimum_size.y = 14
+	vb.add_child(gap)
+	var col := VBoxContainer.new()
+	col.add_theme_constant_override("separation", 10)
+	col.custom_minimum_size.x = 440
+	col.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
+	vb.add_child(col)
+	var nl := Label.new()
+	nl.text = "SEU NOME"
+	nl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	MenuStyle.style_label(nl, 18, MenuStyle.YELLOW)
+	col.add_child(nl)
 	name_edit = LineEdit.new()
 	name_edit.max_length = 12
 	name_edit.text = player_name
-	name_edit.placeholder_text = "Digite seu nome"
+	name_edit.placeholder_text = "digite seu nome"
 	name_edit.text_submitted.connect(func(_t): _on_join_pressed())
-	vb.add_child(name_edit)
+	MenuStyle.style_line_edit(name_edit)
+	col.add_child(name_edit)
 	var ub := VBoxContainer.new()
-	ub.add_child(_label("Servidor:", 15))
+	var sl := Label.new()
+	sl.text = "SERVIDOR"
+	sl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	MenuStyle.style_label(sl, 15, MenuStyle.YELLOW)
+	ub.add_child(sl)
 	url_edit = LineEdit.new()
 	url_edit.text = Net.default_url()
+	MenuStyle.style_line_edit(url_edit, 18)
 	ub.add_child(url_edit)
 	url_box = ub
 	url_box.visible = not Net.url_has_server_param()
-	vb.add_child(url_box)
-	vb.add_child(_button("ENTRAR", _on_join_pressed, 22))
+	col.add_child(url_box)
+	var enter := MenuStyle.NeonButton.new("ENTRAR", 56, true)
+	enter.pressed.connect(_on_join_pressed)
+	col.add_child(enter)
 	var hb := HBoxContainer.new()
-	var h1 := _button("Hospedar e jogar", _on_host_pressed, 15)
-	h1.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	var h2 := _button("Servidor dedicado", _on_dedicated_pressed, 15)
-	h2.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	hb.alignment = BoxContainer.ALIGNMENT_CENTER
+	hb.add_theme_constant_override("separation", 30)
+	var h1 := MenuStyle.NeonButton.new("HOSPEDAR E JOGAR", 24)
+	h1.pressed.connect(_on_host_pressed)
+	var h2 := MenuStyle.NeonButton.new("SERVIDOR DEDICADO", 24)
+	h2.pressed.connect(_on_dedicated_pressed)
 	hb.add_child(h1)
 	hb.add_child(h2)
 	host_box = hb
 	host_box.visible = not OS.has_feature("web")
-	vb.add_child(host_box)
-	status_label = _label("", 15)
-	status_label.modulate = Color(1, 0.75, 0.5)
+	col.add_child(host_box)
+	status_label = Label.new()
+	status_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	status_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	status_label.custom_minimum_size.x = 420
-	vb.add_child(status_label)
-	var help := _label("Teclado: Setas/WASD movem • Espaço solta bomba • Shift/E ação\nCelular: direcional à esquerda, botões à direita", 13)
-	help.modulate = Color(1, 1, 1, 0.6)
-	vb.add_child(help)
+	status_label.custom_minimum_size.x = 440
+	MenuStyle.style_label(status_label, 16, MenuStyle.YELLOW)
+	col.add_child(status_label)
+	var help := Label.new()
+	help.text = "Teclado: Setas/WASD movem • Espaço solta bomba • Shift/E ação\nCelular: direcional à esquerda, botões à direita"
+	help.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	MenuStyle.style_label(help, 14, Color(1, 1, 1, 0.8))
+	help.set_anchors_and_offsets_preset(Control.PRESET_BOTTOM_WIDE)
+	help.offset_top = -56
+	help.offset_bottom = -10
+	root.add_child(help)
+	root.add_child(MenuStyle.Scanlines.new())
 
 
 func _build_lobby() -> void:
-	var r := _make_panel(900)
-	screens["lobby"] = r[0]
-	var vb: VBoxContainer = r[1]
-	var title := _label("SALA DE ESPERA", 30)
-	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	# mesmo visual neon do menu (scripts/menu_style.gd)
+	var root := Control.new()
+	root.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	root.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	ui.add_child(root)
+	screens["lobby"] = root
+	root.add_child(MenuStyle.Background.new())
+	var center := CenterContainer.new()
+	center.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	center.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	root.add_child(center)
+	var vb := VBoxContainer.new()
+	vb.add_theme_constant_override("separation", 12)
+	center.add_child(vb)
+	var title := MenuStyle.Title.new()
+	title.text = "SALA DE ESPERA"
+	title.font_size = 58
+	title.custom_minimum_size.x = 960
 	vb.add_child(title)
+
 	var lb := HBoxContainer.new()
-	lb.add_child(_label("Convide pelo link:", 15))
+	lb.add_theme_constant_override("separation", 12)
+	lb.add_child(MenuStyle.label("CONVIDE PELO LINK", 17, MenuStyle.YELLOW))
 	link_edit = LineEdit.new()
 	link_edit.editable = false
 	link_edit.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	MenuStyle.style_line_edit(link_edit, 17)
 	lb.add_child(link_edit)
-	copy_btn = _button("Copiar link", _on_copy_pressed, 15)
+	copy_btn = MenuStyle.NeonButton.new("COPIAR LINK", 20, false, MenuStyle.CYAN)
+	copy_btn.pressed.connect(_on_copy_pressed)
 	lb.add_child(copy_btn)
 	link_box = lb
 	vb.add_child(link_box)
 
 	var cols := HBoxContainer.new()
-	cols.add_theme_constant_override("separation", 28)
+	cols.add_theme_constant_override("separation", 24)
 	vb.add_child(cols)
 
+	# ---- esquerda: jogadores + configuração do líder
+	var lp := MenuStyle.panel(MenuStyle.PINK)
+	lp.custom_minimum_size.x = 430
+	cols.add_child(lp)
 	var left := VBoxContainer.new()
-	left.custom_minimum_size.x = 380
-	cols.add_child(left)
-	left.add_child(_label("Jogadores (máx. %d):" % G.MAX_PLAYERS, 16))
+	left.add_theme_constant_override("separation", 8)
+	lp.add_child(left)
+	left.add_child(MenuStyle.label("JOGADORES  (MÁX. %d)" % G.MAX_PLAYERS, 20, MenuStyle.PINK))
 	lobby_list = VBoxContainer.new()
+	lobby_list.add_theme_constant_override("separation", 6)
 	left.add_child(lobby_list)
 	var spacer := Control.new()
-	spacer.custom_minimum_size.y = 8
+	spacer.custom_minimum_size.y = 6
 	left.add_child(spacer)
 
 	leader_box = VBoxContainer.new()
+	leader_box.add_theme_constant_override("separation", 4)
 	left.add_child(leader_box)
-	var rw := HBoxContainer.new()
-	rw.add_child(_label("Vitórias para vencer:", 16))
-	rw.add_child(_button(" - ", func(): _to_server(&"rpc_cfg", [cl_cfg_wins - 1, cl_cfg_time]), 16))
-	wins_value = _label("3", 16)
-	rw.add_child(wins_value)
-	rw.add_child(_button(" + ", func(): _to_server(&"rpc_cfg", [cl_cfg_wins + 1, cl_cfg_time]), 16))
-	leader_box.add_child(rw)
-	var rt := HBoxContainer.new()
-	rt.add_child(_label("Tempo da rodada:", 16))
-	rt.add_child(_button(" - ", func(): _to_server(&"rpc_cfg", [cl_cfg_wins, cl_cfg_time - 30]), 16))
-	time_value = _label("3:00", 16)
-	rt.add_child(time_value)
-	rt.add_child(_button(" + ", func(): _to_server(&"rpc_cfg", [cl_cfg_wins, cl_cfg_time + 30]), 16))
-	leader_box.add_child(rt)
+	var cfg_row := func(text: String, minus: Callable, plus: Callable) -> Label:
+		var row := HBoxContainer.new()
+		var l := MenuStyle.label(text, 18, Color.WHITE, 5)
+		l.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		row.add_child(l)
+		var bm := MenuStyle.NeonButton.new(" - ", 24, false, MenuStyle.CYAN)
+		bm.pressed.connect(minus)
+		row.add_child(bm)
+		var v := MenuStyle.label("", 22, MenuStyle.YELLOW)
+		v.custom_minimum_size.x = 64
+		v.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		row.add_child(v)
+		var bp := MenuStyle.NeonButton.new(" + ", 24, false, MenuStyle.CYAN)
+		bp.pressed.connect(plus)
+		row.add_child(bp)
+		leader_box.add_child(row)
+		return v
+	wins_value = cfg_row.call("VITÓRIAS PARA VENCER",
+		func(): _to_server(&"rpc_cfg", [cl_cfg_wins - 1, cl_cfg_time]),
+		func(): _to_server(&"rpc_cfg", [cl_cfg_wins + 1, cl_cfg_time]))
+	time_value = cfg_row.call("TEMPO DA RODADA",
+		func(): _to_server(&"rpc_cfg", [cl_cfg_wins, cl_cfg_time - 30]),
+		func(): _to_server(&"rpc_cfg", [cl_cfg_wins, cl_cfg_time + 30]))
 	var rb := HBoxContainer.new()
-	rb.add_child(_button("+ Bot", func(): _to_server(&"rpc_bots", [true]), 16))
-	rb.add_child(_button("- Bot", func(): _to_server(&"rpc_bots", [false]), 16))
+	rb.alignment = BoxContainer.ALIGNMENT_CENTER
+	rb.add_theme_constant_override("separation", 40)
+	var add_bot := MenuStyle.NeonButton.new("+ BOT", 24)
+	add_bot.pressed.connect(func(): _to_server(&"rpc_bots", [true]))
+	rb.add_child(add_bot)
+	var del_bot := MenuStyle.NeonButton.new("- BOT", 24)
+	del_bot.pressed.connect(func(): _to_server(&"rpc_bots", [false]))
+	rb.add_child(del_bot)
 	leader_box.add_child(rb)
-	start_btn = _button("INICIAR PARTIDA", func(): _to_server(&"rpc_start"), 22)
+	start_btn = MenuStyle.NeonButton.new("INICIAR PARTIDA", 28, true)
+	start_btn.pressed.connect(func(): _to_server(&"rpc_start"))
 	leader_box.add_child(start_btn)
-	var close_btn := _button("Encerrar sala (expulsar todos)", func(): close_dialog.popup_centered(), 15)
-	close_btn.modulate = Color(1, 0.6, 0.55)
+	var close_btn := MenuStyle.NeonButton.new("ENCERRAR SALA (EXPULSAR TODOS)", 17, false, Color(1, 0.45, 0.4))
+	close_btn.pressed.connect(func(): close_dialog.popup_centered())
 	leader_box.add_child(close_btn)
 	close_dialog = ConfirmationDialog.new()
 	close_dialog.title = "Encerrar sala"
@@ -1028,34 +1146,47 @@ func _build_lobby() -> void:
 	close_dialog.cancel_button_text = "Cancelar"
 	close_dialog.confirmed.connect(func(): _to_server(&"rpc_close_room"))
 	ui.add_child(close_dialog)
-	wait_label = _label("", 16)
-	wait_label.modulate = Color(1, 1, 1, 0.75)
+	wait_label = MenuStyle.label("", 18, Color(1, 1, 1, 0.85), 5)
+	wait_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	left.add_child(wait_label)
-	left.add_child(_button("Sair", _on_leave_pressed, 15))
+	var leave := MenuStyle.NeonButton.new("SAIR", 22)
+	leave.pressed.connect(_on_leave_pressed)
+	left.add_child(leave)
 
+	# ---- direita: legenda dos itens
+	var rp := MenuStyle.panel(MenuStyle.CYAN)
+	rp.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	cols.add_child(rp)
 	var right := VBoxContainer.new()
-	right.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	cols.add_child(right)
-	right.add_child(_label("Itens (escondidos nos blocos):", 16))
+	right.add_theme_constant_override("separation", 8)
+	rp.add_child(right)
+	right.add_child(MenuStyle.label("ITENS  (ESCONDIDOS NAS MESAS)", 20, MenuStyle.CYAN))
 	var scroll := ScrollContainer.new()
-	scroll.custom_minimum_size = Vector2(440, 380)
+	scroll.custom_minimum_size = Vector2(470, 340)
 	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	MenuStyle.style_scroll(scroll)
 	right.add_child(scroll)
 	var items_vb := VBoxContainer.new()
 	items_vb.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	items_vb.add_theme_constant_override("separation", 8)
 	scroll.add_child(items_vb)
 	for i in range(1, G.ITEM_COUNT):
 		var row := HBoxContainer.new()
-		row.add_theme_constant_override("separation", 10)
+		row.add_theme_constant_override("separation", 12)
 		var icon := ItemIcon.new()
 		icon.item = i
 		row.add_child(icon)
-		var l := _label("%s — %s" % [G.ITEM_NAMES[i], G.ITEM_DESCS[i]], 14)
-		l.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-		l.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-		l.custom_minimum_size.x = 360
-		row.add_child(l)
+		var txt := VBoxContainer.new()
+		txt.add_theme_constant_override("separation", 0)
+		txt.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		txt.add_child(MenuStyle.label(String(G.ITEM_NAMES[i]).to_upper(), 16, MenuStyle.YELLOW, 4))
+		var d := MenuStyle.label(G.ITEM_DESCS[i], 14, Color(1, 1, 1, 0.9), 3)
+		d.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+		d.custom_minimum_size.x = 380
+		txt.add_child(d)
+		row.add_child(txt)
 		items_vb.add_child(row)
+	root.add_child(MenuStyle.Scanlines.new())
 
 
 func _build_hud() -> void:
@@ -1067,7 +1198,7 @@ func _build_hud() -> void:
 	var top := HBoxContainer.new()
 	top.set_anchors_and_offsets_preset(Control.PRESET_TOP_WIDE)
 	top.offset_left = 12
-	top.offset_right = -12 - (FullscreenButton.SIZE + 10 if show_fs else 0)
+	top.offset_right = -12 - (SettingsMenu.GearButton.SIZE + 10) - (FullscreenButton.SIZE + 10 if show_fs else 0)
 	top.offset_bottom = 46
 	top.add_theme_constant_override("separation", 16)
 	hud.add_child(top)
@@ -1136,7 +1267,11 @@ func _show(which: String) -> void:
 	for k in screens:
 		screens[k].visible = (k == which)
 	view.visible = which == "game"
-	touch.visible = which == "game" and DisplayServer.is_touchscreen_available()
+	touch.visible = which == "game" and DisplayServer.is_touchscreen_available() and not settings.visible
+	if which == "game":
+		music.fade_out()     # a partida começou: a música some aos poucos
+	else:
+		music.play_intro()   # menu / sala de espera: sorteia e toca em loop
 	if which != "game":
 		overlay.visible = false
 		dir_stack.clear()
@@ -1199,26 +1334,30 @@ func _refresh_lobby() -> void:
 	for e in cl_players:
 		var hb := HBoxContainer.new()
 		hb.add_theme_constant_override("separation", 10)
-		var sw := ColorRect.new()
-		sw.custom_minimum_size = Vector2(22, 22)
-		sw.color = G.PLAYER_COLORS[int(e[2]) % G.PLAYER_COLORS.size()]
+		var sw := Panel.new()
+		var sb := StyleBoxFlat.new()
+		sb.bg_color = G.PLAYER_COLORS[int(e[2]) % G.PLAYER_COLORS.size()]
+		sb.border_color = MenuStyle.INK
+		sb.set_border_width_all(2)
+		sb.skew = Vector2(0.25, 0)
+		sw.add_theme_stylebox_override("panel", sb)
+		sw.custom_minimum_size = Vector2(26, 22)
 		sw.size_flags_vertical = Control.SIZE_SHRINK_CENTER
 		hb.add_child(sw)
-		var txt: String = e[1]
+		hb.add_child(MenuStyle.label(String(e[1]).to_upper(), 20))
 		if e[0] == cl_leader:
-			txt += "  (líder)"
+			hb.add_child(MenuStyle.label("LÍDER", 15, MenuStyle.YELLOW, 4))
 		if e[0] == my_id:
-			txt += "  (você)"
-		hb.add_child(_label(txt, 17))
+			hb.add_child(MenuStyle.label("VOCÊ", 15, MenuStyle.CYAN, 4))
 		lobby_list.add_child(hb)
 	var is_leader := my_id != 0 and my_id == cl_leader
 	leader_box.visible = is_leader
 	wait_label.visible = not is_leader
-	wait_label.text = "Aguardando o líder iniciar a partida...\nVitórias para vencer: %d • Tempo: %s" % [cl_cfg_wins, _fmt_time(cl_cfg_time)]
+	wait_label.text = "AGUARDANDO O LÍDER INICIAR A PARTIDA...\nVitórias para vencer: %d  •  Tempo: %s" % [cl_cfg_wins, _fmt_time(cl_cfg_time)]
 	wins_value.text = str(cl_cfg_wins)
 	time_value.text = _fmt_time(cl_cfg_time)
 	var n := cl_players.size()
-	start_btn.text = "INICIAR PARTIDA (%d jogador%s)" % [n, "" if n == 1 else "es"]
+	start_btn.text = "INICIAR PARTIDA (%d JOGADOR%s)" % [n, "" if n == 1 else "ES"]
 	var link := _invite_link()
 	link_box.visible = link != ""
 	link_edit.text = link
@@ -1238,9 +1377,9 @@ func _invite_link() -> String:
 
 func _on_copy_pressed() -> void:
 	Net.copy_text(link_edit.text)
-	copy_btn.text = "Copiado!"
+	copy_btn.text = "COPIADO!"
 	await get_tree().create_timer(1.5).timeout
-	copy_btn.text = "Copiar link"
+	copy_btn.text = "COPIAR LINK"
 
 
 func _rebuild_chips(ids: Array) -> void:
@@ -1334,9 +1473,13 @@ func _load_settings() -> void:
 	var cf := ConfigFile.new()
 	if cf.load(SETTINGS_PATH) == OK:
 		player_name = str(cf.get_value("player", "name", ""))
+		music_vol = clampf(float(cf.get_value("audio", "music", 0.8)), 0.0, 1.0)
+		sfx_vol = clampf(float(cf.get_value("audio", "sfx", 0.8)), 0.0, 1.0)
 
 
 func _save_settings() -> void:
 	var cf := ConfigFile.new()
 	cf.set_value("player", "name", player_name)
+	cf.set_value("audio", "music", music_vol)
+	cf.set_value("audio", "sfx", sfx_vol)
 	cf.save(SETTINGS_PATH)
