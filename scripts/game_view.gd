@@ -5,14 +5,29 @@ extends Node2D
 const G = preload("res://scripts/g.gd")
 const WebAudio = preload("res://scripts/web_audio.gd")
 
+## Atraso proposital do desenho em relação ao servidor. Com ~3 snapshots de folga,
+## atrasos irregulares da rede (Wi-Fi, TCP) não viram trancos no movimento.
+const INTERP_DELAY := 0.1
+const SNAP_JUMP := 1.5    # salto maior que isso (em casas) não é interpolado: teletransporta
+
 var has_data := false
 var tiles := PackedByteArray()
 var flames := PackedByteArray()
 var items := PackedByteArray()
 var players: Array = []
 var bombs: Array = []
-var pdisp := {}      # id -> posição exibida (suavizada)
+var pdisp := {}      # id -> posição exibida (interpolada)
 var bdisp := {}
+# buffer de interpolação: snapshots [tempo do servidor (s), snapshot] ainda não exibidos
+var _buf: Array = []
+var _cur_ts := -1.0
+var _lag_min := INF  # menor (chegada local - tempo do servidor) visto: estima o relógio do servidor
+var _starved := false
+var underruns := 0   # quantas vezes o buffer esvaziou (diagnóstico --net-stats)
+var _events: Array = []   # [instante local para rodar, tipo, dados]
+var arena: Node2D         # chão, pilares e paredes: só redesenha quando o mapa muda
+var _arena_tiles := PackedByteArray()
+var _shake_off := Vector2.ZERO
 var colors := {}
 var names := {}
 var my_id := 0
@@ -42,6 +57,10 @@ func _ready() -> void:
 		sfx_boom.stream = load(SFX_EXPLOSION)
 		WebAudio.preload_sound(SFX_EXPLOSION)
 	add_child(sfx_boom)
+	arena = ArenaLayer.new()
+	arena.view = self
+	arena.show_behind_parent = true
+	add_child(arena)
 
 
 func play_boom() -> void:
@@ -68,18 +87,82 @@ func reset() -> void:
 	actions.clear()
 	death_t.clear()
 	winner = 0
+	_buf.clear()
+	_events.clear()
+	_cur_ts = -1.0
+	_lag_min = INF
+	_starved = false
+	_arena_tiles = PackedByteArray()
 
 
-func apply(s: Array) -> void:
+## Snapshot recebido (ms = relógio do servidor). Entra no buffer e é exibido INTERP_DELAY depois.
+func push_snapshot(ms: int, s: Array) -> void:
+	var ts := ms / 1000.0
+	if ts <= _cur_ts or (not _buf.is_empty() and ts <= float(_buf.back()[0])):
+		return   # velho ou repetido
+	_lag_min = minf(_lag_min, t - ts)
+	_buf.append([ts, s])
+	if not has_data:
+		_apply(_buf.pop_front())
+
+
+func _apply(entry: Array) -> void:
+	_cur_ts = entry[0]
+	var s: Array = entry[1]
 	tiles = s[1]
 	flames = s[2]
 	items = s[3]
 	players = s[4]
 	bombs = s[5]
 	has_data = true
+	if tiles != _arena_tiles:
+		_arena_tiles = tiles
+		arena.queue_redraw()
 
 
+## Avança o "relógio de exibição" e interpola jogadores e bombas entre dois snapshots.
+func _advance(dt: float) -> void:
+	if _lag_min == INF:
+		return
+	_lag_min += dt * 0.02   # deriva lenta: se a rede piorar de vez, o atraso se ajusta sozinho
+	var render := t - _lag_min - INTERP_DELAY
+	# muito atrasado (aba em segundo plano, rede travou e voltou): pula para perto do mais novo
+	if not _buf.is_empty() and float(_buf.back()[0]) - render > INTERP_DELAY * 4.0:
+		_lag_min = t - float(_buf.back()[0])
+		render = t - _lag_min - INTERP_DELAY
+	while not _buf.is_empty() and float(_buf[0][0]) <= render:
+		_apply(_buf.pop_front())
+	var f := 0.0
+	var nxt: Array = []
+	if not _buf.is_empty():
+		_starved = false
+		var nts := float(_buf[0][0])
+		f = clampf((render - _cur_ts) / maxf(nts - _cur_ts, 0.001), 0.0, 1.0)
+		nxt = _buf[0][1]
+	elif render > _cur_ts + 0.05 and not _starved:
+		_starved = true
+		underruns += 1
+	_interp(players, nxt[4] if not nxt.is_empty() else [], f, pdisp)
+	_interp(bombs, nxt[5] if not nxt.is_empty() else [], f, bdisp)
+
+
+func _interp(cur: Array, nxt: Array, f: float, out: Dictionary) -> void:
+	out.clear()
+	var next_pos := {}
+	for e in nxt:
+		next_pos[e[0]] = Vector2(e[1], e[2])
+	for e in cur:
+		var a := Vector2(e[1], e[2])
+		var b: Vector2 = next_pos.get(e[0], a)
+		out[e[0]] = a if a.distance_to(b) > SNAP_JUMP else a.lerp(b, f)
+
+
+## Eventos (explosão, morte...) rodam com o mesmo atraso do desenho, para coincidir com a tela.
 func on_event(kind: String, data: Array) -> void:
+	_events.append([t + INTERP_DELAY, kind, data])
+
+
+func _run_event(kind: String, data: Array) -> void:
 	match kind:
 		"boom":
 			shake = maxf(shake, 0.12)
@@ -153,26 +236,13 @@ func _dir_name(fx: int, fy: int) -> String:
 func _process(dt: float) -> void:
 	t += dt
 	shake = maxf(0.0, shake - dt)
-	var a := 1.0 - exp(-dt * 22.0)
-	for e in players:
-		var id: int = e[0]
-		var target := Vector2(e[1], e[2])
-		if not pdisp.has(id) or (pdisp[id] as Vector2).distance_to(target) > 1.5:
-			pdisp[id] = target
-		else:
-			pdisp[id] = (pdisp[id] as Vector2).lerp(target, a)
-	var seen := {}
-	for e in bombs:
-		var id: int = e[0]
-		seen[id] = true
-		var target := Vector2(e[1], e[2])
-		if not bdisp.has(id) or (bdisp[id] as Vector2).distance_to(target) > 1.5:
-			bdisp[id] = target
-		else:
-			bdisp[id] = (bdisp[id] as Vector2).lerp(target, a)
-	for id in bdisp.keys():
-		if not seen.has(id):
-			bdisp.erase(id)
+	while not _events.is_empty() and float(_events[0][0]) <= t:
+		var ev: Array = _events.pop_front()
+		_run_event(ev[1], ev[2])
+	_advance(dt)
+	_shake_off = Vector2(randf_range(-3, 3), randf_range(-3, 3)) if shake > 0.0 else Vector2.ZERO
+	if arena.position != _shake_off:
+		arena.position = _shake_off
 	queue_redraw()
 
 
@@ -182,51 +252,71 @@ func _is_edge(x: int, y: int) -> bool:
 
 ## Borda do escritório: parede alta em cima (com decorações), parede fina nos lados e embaixo.
 ## As partes transparentes dos sprites deixam ver o fundo, fora da sala.
-func _draw_wall(x: int, y: int, r: Rect2) -> void:
+func _draw_wall(ci: CanvasItem, x: int, y: int, r: Rect2) -> void:
 	if y == 0 or y == G.H - 1:
 		var tex := Sprites.tex("officeWall/" + (WALL_DECOR.get(x, "wall_plain") if y == 0 else "wall_bottom"))
 		# nos cantos só o pedaço que encontra a parede lateral (que tem 7 px de espessura)
 		if x == 0:
-			draw_texture_rect_region(tex, Rect2(r.position + Vector2(25, 0), Vector2(7, 32)), Rect2(25, 0, 7, 32))
+			ci.draw_texture_rect_region(tex, Rect2(r.position + Vector2(25, 0), Vector2(7, 32)), Rect2(25, 0, 7, 32))
 		elif x == G.W - 1:
-			draw_texture_rect_region(tex, Rect2(r.position, Vector2(7, 32)), Rect2(0, 0, 7, 32))
+			ci.draw_texture_rect_region(tex, Rect2(r.position, Vector2(7, 32)), Rect2(0, 0, 7, 32))
 		else:
-			draw_texture_rect(tex, r, false)
+			ci.draw_texture_rect(tex, r, false)
 	elif x == 0:
-		draw_texture_rect(Sprites.tex("officeWall/wall_left"), r, false)
+		ci.draw_texture_rect(Sprites.tex("officeWall/wall_left"), r, false)
 	else:
-		draw_texture_rect(Sprites.tex("officeWall/wall_right"), r, false)
+		ci.draw_texture_rect(Sprites.tex("officeWall/wall_right"), r, false)
+
+
+## Parte fixa da arena (chão, pilares, paredes, blocos caídos), desenhada pela ArenaLayer
+## só quando o mapa muda — antes eram ~220 sprites redesenhados a cada quadro.
+func _draw_static(ci: CanvasItem) -> void:
+	if not has_data or tiles.size() != G.W * G.H:
+		return
+	var T := float(G.TILE)
+	var floor_a := Sprites.tex("floor")
+	var floor_b := Sprites.tex("floor_alt")
+	var hard := Sprites.tex("hard")
+	var fallen := Sprites.tex("fallen")
+	var use_wall := Sprites.is_custom("officeWall/wall_plain")
+	for y in G.H:
+		for x in G.W:
+			var r := Rect2(x * T, y * T, T, T)
+			var tt: int = tiles[y * G.W + x]
+			if tt == G.T_HARD and use_wall and _is_edge(x, y):
+				_draw_wall(ci, x, y, r)
+			elif tt == G.T_HARD:
+				ci.draw_texture_rect(hard, r, false)
+			elif tt == G.T_FALLEN:
+				ci.draw_texture_rect(fallen, r, false)
+			else:
+				ci.draw_texture_rect(floor_a if (x + y) % 2 == 0 else floor_b, r, false)
+
+
+class ArenaLayer extends Node2D:
+	var view: Node2D
+
+	func _draw() -> void:
+		view._draw_static(self)
 
 
 func _draw() -> void:
 	if not has_data:
 		return
 	var T := float(G.TILE)
-	if shake > 0.0:
-		draw_set_transform(Vector2(randf_range(-3, 3), randf_range(-3, 3)))
-	var floor_a := Sprites.tex("floor")
-	var floor_b := Sprites.tex("floor_alt")
-	var hard := Sprites.tex("hard")
-	var fallen := Sprites.tex("fallen")
+	if _shake_off != Vector2.ZERO:
+		draw_set_transform(_shake_off)
 	var soft := Sprites.tex("soft")
 	var soft_anim: Array = Sprites.seq("deskOffice/deskOffice_")
 	var flame := Sprites.tex("flame")
-	var use_wall := Sprites.is_custom("officeWall/wall_plain")
 
-	# ---- arena
+	# ---- arena: só o que muda (mesas animadas, blocos queimando, itens); o resto está na ArenaLayer
 	for y in G.H:
 		for x in G.W:
 			var k := y * G.W + x
-			var r := Rect2(x * T, y * T, T, T)
 			var tt: int = tiles[k]
-			if tt == G.T_HARD and use_wall and _is_edge(x, y):
-				_draw_wall(x, y, r)
-			elif tt == G.T_HARD:
-				draw_texture_rect(hard, r, false)
-			elif tt == G.T_FALLEN:
-				draw_texture_rect(fallen, r, false)
-			else:
-				draw_texture_rect(floor_a if (x + y) % 2 == 0 else floor_b, r, false)
+			var r := Rect2(x * T, y * T, T, T)
+			if tt == G.T_SOFT or tt == G.T_BURNING:
 				var st: Texture2D = soft
 				if not soft_anim.is_empty():
 					# cada mesa começa num quadro diferente para não piscarem todas juntas
@@ -234,10 +324,10 @@ func _draw() -> void:
 					st = soft_anim[f]
 				if tt == G.T_SOFT:
 					draw_texture_rect(st, r, false)
-				elif tt == G.T_BURNING:
+				else:
 					draw_texture_rect(st, r, false, Color(1.0, 0.45 + 0.3 * sin(t * 40.0), 0.2))
-				elif items[k] != 0:
-					Sprites.draw_item(self, items[k], r)
+			elif tt == G.T_EMPTY and items[k] != 0:
+				Sprites.draw_item(self, items[k], r)
 
 	# ---- bombas
 	var btex := Sprites.tex("bomb")

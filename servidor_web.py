@@ -1,9 +1,11 @@
-"""Serve a versão web do jogo sem cache (evita jogadores com versão antiga após atualizar o build).
+"""Serve a versão web do jogo com cache revalidado (o navegador confere a cada visita se o
+arquivo mudou: não baixa tudo de novo, e ninguém fica com versão antiga após atualizar o build).
 
 Uso: python servidor_web.py [porta=8060] [pasta=build/web] [endereco=0.0.0.0]
 """
 import functools
 import http.server
+import json
 import os
 import sys
 
@@ -12,6 +14,20 @@ PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 
 
 class NoCacheHandler(http.server.SimpleHTTPRequestHandler):
+    def do_GET(self):
+        # lista das músicas de entrada (no Docker o build gera esse arquivo)
+        if self.path.split("?", 1)[0] == "/assets/sounds/intro/index.json":
+            folder = os.path.join(PROJECT_ROOT, "assets", "sounds", "intro")
+            names = sorted(f for f in os.listdir(folder) if f.lower().endswith((".ogg", ".mp3")))
+            body = json.dumps(names).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        super().do_GET()
+
     def translate_path(self, path):
         # sons soltos (usados pelo web_audio.gd em http://) vêm direto da pasta do projeto
         clean = path.split("?", 1)[0].split("#", 1)[0]
@@ -22,8 +38,8 @@ class NoCacheHandler(http.server.SimpleHTTPRequestHandler):
         return super().translate_path(path)
 
     def end_headers(self):
-        self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
-        self.send_header("Expires", "0")
+        # guarda, mas confere a cada visita (If-Modified-Since -> 304): não baixa tudo de novo
+        self.send_header("Cache-Control", "no-cache")
         super().end_headers()
 
     def log_message(self, fmt, *args):

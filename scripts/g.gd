@@ -6,6 +6,7 @@ const TILE := 32          # tamanho do sprite/tile em pixels
 const W := 17             # largura da arena em tiles (inclui bordas)
 const H := 13             # altura da arena em tiles (inclui bordas)
 const MAX_PLAYERS := 8
+const MAX_ROOMS := 8        # salas abertas ao mesmo tempo no servidor
 const DEFAULT_PORT := 9080
 
 # ---------------------------------------------------------------- tiles

@@ -58,7 +58,7 @@ docker compose --profile https up -d --build
 
 O Caddy gera o certificado e serve tudo em `https://DOMINIO` (jogo conecta em `wss://DOMINIO/ws`). É um link só.
 
-Comandos úteis: `docker compose logs -f game` (log do servidor), `docker compose restart game` (zera a sala), `docker compose down`.
+Comandos úteis: `docker compose logs -f game` (log do servidor), `docker compose restart game` (zera todas as salas), `docker compose down`.
 
 ## Jogar na rede local sem Docker
 
@@ -71,7 +71,8 @@ Comandos úteis: `docker compose logs -f game` (log do servidor), `docker compos
    ```
 
    `--share-url` é o link exibido no lobby em "Convide pelo link" (sem ele, o servidor tenta adivinhar o IP).
-   O `servidor_web.py` desativa o cache, assim ninguém fica com uma versão antiga depois de reexportar.
+   O `servidor_web.py` usa cache revalidado: o navegador guarda os arquivos, mas confere a cada visita se mudaram,
+   assim ninguém fica com uma versão antiga depois de reexportar.
 
 3. Libere as portas no Firewall do Windows (PowerShell **como administrador**, uma vez só):
 
@@ -84,10 +85,26 @@ Comandos úteis: `docker compose logs -f game` (log do servidor), `docker compos
 > O preset Web inclui um ajuste (`html/head_include`) que permite rodar via `http://` na rede local.
 > Sem ele, o Godot exige HTTPS fora do `localhost`.
 >
-> **Som em `http://`:** o áudio do Godot na web depende do AudioWorklet, que o navegador só libera em
-> HTTPS/`localhost`. Nesse caso o `scripts/web_audio.gd` toca música e efeitos direto pela Web Audio API,
-> lendo os arquivos soltos de `assets/sounds/` (o Docker copia para o site; o `servidor_web.py` serve da
-> pasta do projeto). Em HTTPS/`localhost` o som continua saindo pelo Godot normalmente.
+> **Som na web:** as músicas de entrada ficam **fora** do pacote do jogo (`index.pck`), para ele abrir
+> mais rápido, e tocam em streaming pelo `scripts/web_audio.gd`, a partir de `assets/sounds/intro/index.json`.
+> O Docker gera essa lista no build e o `servidor_web.py` lista a pasta na hora.
+> Os efeitos tocam pelo Godot, exceto em `http://IP-DA-REDE`: lá o navegador não libera o AudioWorklet, e
+> eles também vão pela Web Audio API, lendo os arquivos soltos de `assets/sounds/`.
+
+## Desempenho online
+
+- **Carregamento:** o site usa cache com revalidação (`Cache-Control: no-cache` + ETag). Da segunda visita
+  em diante, o navegador só baixa de novo o que mudou no build. Sem as músicas, o pacote caiu de 3,6 MB para 0,2 MB.
+- **Rede:** os snapshots vão em bytes (`scripts/snapshot_codec.gd`), e o mapa só é enviado quando muda.
+  Cada snapshot tem ~200–300 B (antes ~1,6 KB), 30 vezes por segundo.
+- **Movimento:** o cliente desenha ~100 ms atrás do servidor e interpola entre dois snapshots
+  (`INTERP_DELAY` em `scripts/game_view.gd`). Atrasos irregulares da rede não viram trancos.
+  Chão, pilares e paredes são desenhados uma vez só, numa camada própria.
+- **Ping** no canto inferior direito da partida (verde < 80 ms, amarelo < 160 ms, vermelho acima).
+- **Diagnóstico:**
+  - `--net-stats` no cliente imprime snapshots/s, bytes, buffer e "engasgos".
+  - `--fake-jitter=60` no servidor simula uma rede ruim.
+  - `--test-bots` mostra o tamanho médio do snapshot.
 
 ## Publicar para a apresentação (um link para a plateia)
 
@@ -131,6 +148,16 @@ numa VPS com TLS (`--cert=fullchain.pem --key=privkey.pem` ativa `wss://`). O li
   mensagem de até 20 caracteres (Enter), que aparece para todos acima do personagem, em maiúsculas, com onda e arco-íris.
 - O líder do lobby (primeiro a entrar) escolhe vitórias, tempo da rodada, adiciona bots e inicia/encerra a partida.
 
+### Salas
+
+- Depois de **ENTRAR**, aparece a lista de salas: dá para **entrar** em uma sala existente ou **criar** uma
+  (nome obrigatório, senha opcional). Salas com senha pedem a senha ao entrar.
+- Até **8 salas** ao mesmo tempo no servidor, cada uma com até 8 jogadores e sua própria partida.
+- Se o líder sair, a liderança passa para o próximo jogador da sala. Quando todos saem, a sala é excluída.
+- **SAIR** volta para a lista de salas; **ENCERRAR SALA** (líder) manda todos de volta para a lista e exclui a sala.
+- O link de convite leva o código da sala (`?sala=K7QX`): quem abre entra direto nela (pedindo a senha, se tiver).
+  O código também aparece no log do servidor quando a sala é criada.
+
 ### Itens
 
 | Sigla | Item | Efeito |
@@ -155,9 +182,12 @@ numa VPS com TLS (`--cert=fullchain.pem --key=privkey.pem` ativa `wss://`). O li
 
 ```
 scenes/main.tscn          cena única (nó "Main")
-scripts/main.gd           menu, lobby, HUD, RPCs, controle de rodadas
+scripts/main.gd           menu, lista de salas, lobby, HUD, RPCs (roteia cada jogador para a sua sala)
+scripts/room.gd           uma sala no servidor: lobby, placar, rodadas e a simulação
 scripts/server_game.gd    simulação autoritativa + IA dos bots
-scripts/game_view.gd      desenho da arena
+scripts/game_view.gd      desenho da arena (buffer de interpolação dos snapshots)
+scripts/snapshot_codec.gd snapshot compacto em bytes (servidor -> clientes)
+scripts/web_audio.gd      música em streaming e efeitos pela Web Audio API (navegador)
 scripts/g.gd              constantes e regras (ajuste o balanceamento aqui)
 scripts/net.gd            conexão WebSocket (autoload Net)
 scripts/sprites.gd        carrega PNGs ou gera blocos (autoload Sprites)

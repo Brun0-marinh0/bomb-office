@@ -10,9 +10,14 @@ extends Node
 ##   --cert=x.pem --key=y.pem ativa wss:// (TLS) direto no servidor
 ##   --test-bots=4            partida só de bots, para testar (sai ao final)
 ##   --autojoin=ws://host:porta --name=Fulano --autostart --addbots=2   (testes)
+##   --room=Nome --room-pass=x   (testes: com --autojoin, entra na sala ou cria se não existir)
 
 const G = preload("res://scripts/g.gd")
-const ServerGame = preload("res://scripts/server_game.gd")
+const Room = preload("res://scripts/room.gd")
+const Codec = preload("res://scripts/snapshot_codec.gd")
+const ROOM_NAME_MAX := 16
+const ROOM_PASS_MAX := 20
+const CODE_CHARS := "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 const GameView = preload("res://scripts/game_view.gd")
 const TouchControls = preload("res://scripts/touch_controls.gd")
 const FullscreenButton = preload("res://scripts/fullscreen_button.gd")
@@ -28,22 +33,10 @@ const ABILITY_NAMES := ["Chute", "Luva", "Remoto", "Perfurante", "Linha", "Super
 var args := {}
 
 # ------------------------------------------------------------- estado do servidor
-var lobby := {}            # id -> {id, name, color, bot}
-var order: Array = []      # ids em ordem de entrada (o primeiro humano é o líder)
-var wins := {}
-var cfg_wins := 3
-var cfg_time := 180
-var state := "lobby"       # lobby | round | round_end | match_end
-var roster: Array = []
-var sim: Node = null
-var round_no := 0
-var _snap_tick := 0
-var _bot_seq := 0
-var test_mode := false
-var sim_speed := 1
+var rooms := {}            # código -> Room (scripts/room.gd)
+var peer_room := {}        # id do jogador -> código da sala em que está
 var share_url := ""
 var share_fixed := false
-var last_winner := 0       # vencedor da última rodada (pode mandar mensagem no modal)
 
 # ------------------------------------------------------------- estado do cliente
 var my_id := 0
@@ -59,8 +52,21 @@ var dir_stack: Array = []
 var last_dir := Vector2i.ZERO
 var auto_started := false
 var _snap_count := 0
+var cl_map: Array = [PackedByteArray(), PackedByteArray()]   # último mapa recebido [blocos, itens]
+var ping_ms := 0
+var _stat_secs := 0      # --net-stats
+var _stat_snaps := 0
+var _stat_bytes := 0
 var cl_share_url := ""
 var cl_share_fixed := false
+var cl_room_name := ""
+var cl_room_code := ""
+var cl_rooms: Array = []        # [código, nome, tem_senha, jogadores, máximo, em_jogo]
+var cl_max_rooms := G.MAX_ROOMS
+var invite_code := ""           # ?sala=CÓDIGO do link de convite (tenta entrar uma vez)
+var _rooms_first := true        # primeira lista de salas depois de conectar
+var _pw_code := ""              # sala que está pedindo senha
+var _leaving := false           # saiu da sala e espera a lista de salas
 
 # ------------------------------------------------------------- UI
 var view: Node2D
@@ -72,6 +78,16 @@ var url_edit: LineEdit
 var url_box: Control
 var host_box: Control
 var status_label: Label
+var rooms_list: VBoxContainer
+var rooms_status: Label
+var rooms_count: Label
+var room_name_edit: LineEdit
+var room_pass_edit: LineEdit
+var create_btn: Button
+var pw_dialog: ConfirmationDialog
+var pw_edit: LineEdit
+var pw_label: Label
+var lobby_title: Control
 var lobby_list: VBoxContainer
 var link_box: Control
 var link_edit: LineEdit
@@ -85,6 +101,7 @@ var start_btn: Button
 var hud_time: Label
 var hud_chips: HBoxContainer
 var hud_stats: Label
+var hud_ping: Label
 var hud_abort: Button
 var overlay: CenterContainer
 var overlay_label: Label
@@ -128,8 +145,14 @@ func _ready() -> void:
 	music = Music.new()
 	add_child(music)
 	music.player.bus = SettingsMenu.BUS_MUSIC
+	invite_code = Net.url_param("sala").strip_edges().to_upper()
 	_build_ui()
 	_show("menu")
+	var net_timer := Timer.new()
+	net_timer.wait_time = 2.0
+	net_timer.autostart = true
+	net_timer.timeout.connect(_net_tick)
+	add_child(net_timer)
 	if args.has("autojoin"):
 		player_name = str(args.get("name", "Teste"))
 		_connect_to(str(args["autojoin"]))
@@ -182,12 +205,13 @@ func _start_dedicated() -> void:
 		get_tree().quit(1)
 		return
 	if args.has("test-bots"):
-		test_mode = true
-		sim_speed = maxi(1, int(args.get("speed", "4")))
-		cfg_wins = maxi(1, int(args.get("wins", "2")))
+		var r := _create_room("Teste", "")
+		r.test_mode = true
+		r.sim_speed = maxi(1, int(args.get("speed", "4")))
+		r.cfg_wins = maxi(1, int(args.get("wins", "2")))
 		for i in clampi(int(args["test-bots"]), 1, G.MAX_PLAYERS):
-			_add_bot()
-		_start_match()
+			r.add_bot()
+		r.start_match()
 
 
 func _start_server(port: int, dedicated: bool, tls: TLSOptions) -> bool:
@@ -198,11 +222,6 @@ func _start_server(port: int, dedicated: bool, tls: TLSOptions) -> bool:
 		if status_label != null:
 			status_label.text = msg
 		return false
-	sim = ServerGame.new()
-	sim.name = "Sim"
-	add_child(sim)
-	sim.round_over.connect(_on_round_over)
-	sim.game_event.connect(_on_sim_event)
 	share_url = _detect_share_url()
 	print("[servidor] escutando em %s://0.0.0.0:%d" % ["wss" if tls != null else "ws", port])
 	if share_url != "":
@@ -238,94 +257,140 @@ func _to_server(m: StringName, a: Array = []) -> void:
 		callv("rpc_id", [1, m] + a)
 
 
-# =================================================================== SERVIDOR: lobby
-func _server_join(id: int, pname: String) -> void:
-	if lobby.has(id):
-		return
-	if order.size() >= G.MAX_PLAYERS and not (state == "lobby" and _remove_bot()):
-		_send_to(id, &"rpc_rejected", ["Sala cheia (máximo de %d jogadores)." % G.MAX_PLAYERS])
-		return
-	lobby[id] = {"id": id, "name": _unique_name(_clean_name(pname)), "color": _free_color(), "bot": false}
-	order.append(id)
-	wins[id] = 0
-	print("[servidor] %s entrou (id %d) — %d na sala" % [lobby[id].name, id, order.size()])
-	_push_lobby()
-
-
-func _add_bot() -> void:
-	if order.size() >= G.MAX_PLAYERS:
-		return
-	_bot_seq += 1
-	var id := -_bot_seq
-	lobby[id] = {"id": id, "name": _unique_name("Bot"), "color": _free_color(), "bot": true}
-	order.append(id)
-	wins[id] = 0
-
-
-func _remove_bot() -> bool:
-	for i in range(order.size() - 1, -1, -1):
-		var id: int = order[i]
-		if lobby[id].bot:
-			lobby.erase(id)
-			wins.erase(id)
-			order.remove_at(i)
-			return true
-	return false
-
-
-func _free_color() -> int:
-	for c in G.MAX_PLAYERS:
-		var used := false
-		for id in order:
-			if lobby[id].color == c:
-				used = true
-		if not used:
-			return c
-	return 0
-
-
-func _unique_name(base: String) -> String:
-	var taken := {}
-	for id in order:
-		taken[lobby[id].name] = true
-	if not taken.has(base) and base != "Bot":
-		return base
-	var n := 1 if base == "Bot" else 2
-	while taken.has("%s %d" % [base, n]):
-		n += 1
-	return "%s %d" % [base, n]
-
-
+# =================================================================== SERVIDOR: salas
 func _clean_name(s: String) -> String:
+	var out := _clean_text(s, 12)
+	return out if out != "" else "Jogador"
+
+
+func _clean_text(s: String, max_len: int) -> String:
 	var out := ""
 	for ch in s.strip_edges():
 		if ch.unicode_at(0) >= 32:
 			out += ch
-	out = out.substr(0, 12).strip_edges()
-	return out if out != "" else "Jogador"
+	return out.substr(0, max_len).strip_edges()
 
 
-func _leader() -> int:
-	for id in order:
-		if not lobby[id].bot:
-			return id
-	return 0
+func _room_of(id: int) -> Node:
+	return rooms.get(peer_room.get(id, ""), null)
 
 
-func _humans(ids: Array) -> int:
-	var n := 0
-	for id in ids:
-		if lobby.has(id) and not lobby[id].bot:
-			n += 1
-	return n
+func _new_code() -> String:
+	while true:
+		var c := ""
+		for i in 4:
+			c += CODE_CHARS[randi() % CODE_CHARS.length()]
+		if not rooms.has(c):
+			return c
+	return ""
 
 
-func _push_lobby() -> void:
+func _create_room(rname: String, pw: String) -> Node:
+	var r := Room.new()
+	r.main = self
+	r.code = _new_code()
+	r.room_name = rname
+	r.password = pw
+	r.name = "Room_" + r.code
+	add_child(r)
+	rooms[r.code] = r
+	r.changed.connect(_push_rooms)
+	r.emptied.connect(_delete_room.bind(r.code))
+	return r
+
+
+func _delete_room(code: String) -> void:
+	var r: Node = rooms.get(code, null)
+	if r == null:
+		return
+	rooms.erase(code)
+	for id in peer_room.keys():
+		if peer_room[id] == code:
+			peer_room.erase(id)
+	r.closed = true
+	r.sim.running = false
+	print("[servidor] sala \"%s\" excluída (%d/%d salas)" % [r.room_name, rooms.size(), G.MAX_ROOMS])
+	# libera depois: a sala pode ter rodadas aguardando um timer
+	get_tree().create_timer(20.0).timeout.connect(r.queue_free)
+	_push_rooms()
+
+
+## Lista de salas para quem está fora de sala (a senha nunca sai do servidor).
+func _rooms_list() -> Array:
 	var list: Array = []
-	for id in order:
-		var e: Dictionary = lobby[id]
-		list.append([id, e.name, e.color, e.bot])
-	_broadcast(&"rpc_lobby", [list, _leader(), state, cfg_wins, cfg_time, share_url, share_fixed])
+	for c in rooms:
+		var r: Node = rooms[c]
+		if r.test_mode:
+			continue
+		list.append([c, r.room_name, r.password != "", r.players_count(), G.MAX_PLAYERS, r.state != "lobby"])
+	return list
+
+
+func _push_rooms(to: int = 0) -> void:
+	var list := _rooms_list()
+	if to != 0:
+		_send_to(to, &"rpc_rooms", [list, G.MAX_ROOMS])
+		return
+	var targets: Array = multiplayer.get_peers()
+	if not Net.is_dedicated:
+		targets.append(multiplayer.get_unique_id())   # host que também joga
+	for id in targets:
+		if not peer_room.has(id):
+			_send_to(id, &"rpc_rooms", [list, G.MAX_ROOMS])
+
+
+func _room_error(id: int, msg: String, code := "", need_pw := false) -> void:
+	_send_to(id, &"rpc_room_error", [msg, code, need_pw])
+
+
+func _server_create_room(id: int, rname: String, pw: String, pname: String) -> void:
+	rname = _clean_text(rname, ROOM_NAME_MAX)
+	pw = _clean_text(pw, ROOM_PASS_MAX)
+	if rname == "":
+		_room_error(id, "Dê um nome para a sala.")
+		return
+	if rooms.size() >= G.MAX_ROOMS:
+		_room_error(id, "Limite de %d salas atingido. Entre em uma sala existente." % G.MAX_ROOMS)
+		return
+	for c in rooms:
+		if String(rooms[c].room_name).to_lower() == rname.to_lower():
+			_room_error(id, "Já existe uma sala chamada \"%s\"." % rname)
+			return
+	_server_leave(id)
+	var r := _create_room(rname, pw)
+	print("[servidor] sala \"%s\" criada%s, código %s (%d/%d salas)" % [rname, " com senha" if pw != "" else "", r.code, rooms.size(), G.MAX_ROOMS])
+	peer_room[id] = r.code
+	r.join(id, pname)
+
+
+func _server_join_room(id: int, code: String, pw: String, pname: String) -> void:
+	code = code.strip_edges().to_upper()
+	var r: Node = rooms.get(code, null)
+	if r == null or r.test_mode:
+		_room_error(id, "Essa sala não existe mais.", code)
+		_push_rooms(id)
+		return
+	if peer_room.get(id, "") == code:
+		r.push_lobby()
+		return
+	if r.password != "" and pw != r.password:
+		_room_error(id, "Senha incorreta." if pw != "" else "A sala \"%s\" tem senha." % r.room_name, code, true)
+		return
+	if r.is_full():
+		_room_error(id, "A sala \"%s\" está cheia (máximo de %d jogadores)." % [r.room_name, G.MAX_PLAYERS], code)
+		return
+	_server_leave(id)
+	peer_room[id] = code
+	if not r.join(id, pname):
+		peer_room.erase(id)
+		_room_error(id, "A sala \"%s\" está cheia." % r.room_name, code)
+
+
+func _server_leave(id: int) -> void:
+	var r := _room_of(id)
+	peer_room.erase(id)
+	if r != null:
+		r.remove_member(id)
 
 
 ## Link para convidar outros jogadores (passe --share-url=... para fixar).
@@ -353,229 +418,111 @@ func _detect_share_url() -> String:
 	return "http://%s:%d/" % [best, web_port] if best != "" else ""
 
 
-## Expulsa todos da sala (botão "Encerrar sala" do líder).
-func _close_room() -> void:
-	print("[servidor] sala encerrada pelo líder — todos foram desconectados")
-	var humans: Array = []
-	for id in order:
-		if not lobby[id].bot:
-			humans.append(id)
-	state = "lobby"
-	if sim != null:
-		sim.running = false
-	lobby.clear()
-	order.clear()
-	wins.clear()
-	roster.clear()
-	_bot_seq = 0
-	for id in humans:
-		_send_to(id, &"rpc_rejected", ["A sala foi encerrada pelo líder."])
-	await get_tree().create_timer(1.0).timeout
-	var peer := multiplayer.multiplayer_peer as WebSocketMultiplayerPeer
-	if peer != null:
-		for id in humans:
-			if id != multiplayer.get_unique_id() and multiplayer.get_peers().has(id):
-				peer.disconnect_peer(id)
-
-
-func _wins_for(ids: Array) -> Dictionary:
-	var w := {}
-	for id in ids:
-		w[id] = int(wins.get(id, 0))
-	return w
-
-
 func _on_peer_disconnected(id: int) -> void:
-	if not Net.is_server or not lobby.has(id):
-		return
-	print("[servidor] %s saiu" % lobby[id].name)
-	lobby.erase(id)
-	order.erase(id)
-	wins.erase(id)
-	if sim != null and state == "round":
-		sim.remove_player(id)
-	if not test_mode and state != "lobby" and _humans(order) == 0:
-		_back_to_lobby()
-		return
-	_push_lobby()
-
-
-# =================================================================== SERVIDOR: partida
-func _start_match() -> void:
-	roster = order.slice(0, G.MAX_PLAYERS)
-	for id in roster:
-		wins[id] = 0
-	round_no = 0
-	print("[servidor] partida iniciada com %d jogadores (vence quem fizer %d)" % [roster.size(), cfg_wins])
-	_start_round()
-
-
-func _start_round() -> void:
-	roster = roster.filter(func(id): return lobby.has(id))
-	if roster.is_empty() or (not test_mode and _humans(roster) == 0):
-		_back_to_lobby()
-		return
-	round_no += 1
-	var entries: Array = []
-	for id in roster:
-		entries.append({"id": id, "name": lobby[id].name, "bot": lobby[id].bot})
-	entries.shuffle()
-	sim.start_round(entries, float(cfg_time))
-	state = "round"
-	_snap_tick = 0
-	_push_lobby()
-	_broadcast(&"rpc_round_start", [round_no, roster.duplicate(), _wins_for(roster)])
-
-
-func _physics_process(delta: float) -> void:
-	if Net.is_server and sim != null and state == "round":
-		for i in sim_speed:
-			if sim.running:
-				sim.tick(delta)
-		_snap_tick += 1
-		if state == "round" and _snap_tick % 2 == 0 and not test_mode:
-			_broadcast(&"rpc_snapshot", [sim.snapshot()])
-	if view != null and screen == "game" and my_id in cl_roster:
-		_send_input()
-
-
-func _on_round_over(winner: int) -> void:
-	if winner != 0:
-		wins[winner] = int(wins.get(winner, 0)) + 1
-	state = "round_end"
-	var wname: String = lobby[winner].name if lobby.has(winner) else "?"
-	print("[servidor] rodada %d: %s" % [round_no, ("vitória de " + wname) if winner != 0 else "empate"])
-	var w := _wins_for(roster)
-	last_winner = winner
-	_broadcast(&"rpc_snapshot", [sim.snapshot()])
-	_broadcast(&"rpc_round_end", [winner, w])
-	var champion := winner != 0 and int(wins[winner]) >= cfg_wins
-	# vencedor humano ganha mais tempo para escrever a mensagem
-	var human_winner: bool = lobby.has(winner) and not lobby[winner].bot
-	var wait := 4.0
-	if champion:
-		wait = 3.0
-	elif human_winner:
-		wait = 9.0
-	await get_tree().create_timer(wait / sim_speed).timeout
-	if state != "round_end":
-		return
-	if test_mode and (champion or round_no >= 20):
-		print("[teste] fim da partida. placar: %s" % str(w))
-		get_tree().quit(0)
-		return
-	if not champion:
-		_start_round()
-		return
-	state = "match_end"
-	print("[servidor] CAMPEÃO: %s" % wname)
-	_broadcast(&"rpc_match_end", [winner, w])
-	await get_tree().create_timer(12.0 if human_winner else 7.0).timeout
-	if state == "match_end":
-		_back_to_lobby()
-
-
-func _back_to_lobby() -> void:
-	state = "lobby"
-	if sim != null:
-		sim.running = false
-	_push_lobby()
-
-
-func _on_sim_event(kind: String, data: Array) -> void:
-	if test_mode:
-		if kind == "death" and lobby.has(data[0]):
-			print("[teste]   %s morreu (faltando %ds)" % [lobby[data[0]].name, int(sim.time_left)])
-		return
-	_broadcast(&"rpc_event", [kind, data])
+	if Net.is_server:
+		_server_leave(id)
 
 
 # =================================================================== RPC: cliente -> servidor
 @rpc("any_peer", "reliable")
-func rpc_join(pname: String) -> void:
+func rpc_list_rooms() -> void:
 	if Net.is_server:
-		_server_join(_sender(), pname)
+		_push_rooms(_sender())
+
+
+@rpc("any_peer", "reliable")
+func rpc_create_room(rname: String, pw: String, pname: String) -> void:
+	if Net.is_server:
+		_server_create_room(_sender(), rname, pw, pname)
+
+
+@rpc("any_peer", "reliable")
+func rpc_join_room(code: String, pw: String, pname: String) -> void:
+	if Net.is_server:
+		_server_join_room(_sender(), code, pw, pname)
+
+
+@rpc("any_peer", "reliable")
+func rpc_leave_room() -> void:
+	if Net.is_server:
+		var id := _sender()
+		_server_leave(id)
+		_push_rooms(id)
 
 
 @rpc("any_peer", "reliable")
 func rpc_cfg(w: int, t: int) -> void:
-	if not Net.is_server or _sender() != _leader() or state != "lobby":
-		return
-	cfg_wins = clampi(w, 1, 9)
-	cfg_time = clampi(t, 60, 300)
-	_push_lobby()
+	var r: Node = _room_of(_sender()) if Net.is_server else null
+	if r != null:
+		r.cfg(_sender(), w, t)
 
 
 @rpc("any_peer", "reliable")
 func rpc_bots(add: bool) -> void:
-	if not Net.is_server or _sender() != _leader() or state != "lobby":
-		return
-	if add:
-		_add_bot()
-	else:
-		_remove_bot()
-	_push_lobby()
+	var r: Node = _room_of(_sender()) if Net.is_server else null
+	if r != null:
+		r.bots(_sender(), add)
 
 
 @rpc("any_peer", "reliable")
 func rpc_start() -> void:
-	if Net.is_server and _sender() == _leader() and state == "lobby" and order.size() >= 1:
-		_start_match()
+	var r: Node = _room_of(_sender()) if Net.is_server else null
+	if r != null:
+		r.start(_sender())
 
 
 @rpc("any_peer", "reliable")
 func rpc_winner_msg(text: String) -> void:
-	if not Net.is_server or (state != "round_end" and state != "match_end"):
-		return
-	var id := _sender()
-	if id != last_winner or not lobby.has(id) or lobby[id].bot:
-		return
-	var clean := ""
-	for ch in text.strip_edges():
-		if ch.unicode_at(0) >= 32:
-			clean += ch
-	clean = clean.substr(0, WINNER_MSG_MAX).strip_edges().to_upper()
-	if clean != "":
-		print("[servidor] mensagem do vencedor %s: %s" % [lobby[id].name, clean])
-		_broadcast(&"rpc_winner_text", [id, clean])
+	var r: Node = _room_of(_sender()) if Net.is_server else null
+	if r != null:
+		r.winner_msg(_sender(), text)
 
 
+## Botão "Encerrar sala" do líder: todos voltam para a lista de salas e a sala é excluída.
 @rpc("any_peer", "reliable")
 func rpc_close_room() -> void:
-	if Net.is_server and _sender() == _leader() and state == "lobby":
-		_close_room()
+	var r: Node = _room_of(_sender()) if Net.is_server else null
+	if r != null and _sender() == r.leader() and r.state == "lobby":
+		r.close("A sala foi encerrada pelo líder.")
+		_delete_room(r.code)
 
 
 @rpc("any_peer", "reliable")
 func rpc_abort() -> void:
-	if Net.is_server and _sender() == _leader() and state != "lobby":
-		print("[servidor] partida encerrada pelo líder")
-		_back_to_lobby()
+	var r: Node = _room_of(_sender()) if Net.is_server else null
+	if r != null:
+		r.abort(_sender())
 
 
 @rpc("any_peer", "reliable")
 func rpc_input(x: int, y: int) -> void:
-	if Net.is_server and sim != null and state == "round":
-		sim.set_input(_sender(), Vector2i(clampi(x, -1, 1), clampi(y, -1, 1)))
+	var r: Node = _room_of(_sender()) if Net.is_server else null
+	if r != null:
+		r.input(_sender(), Vector2i(clampi(x, -1, 1), clampi(y, -1, 1)))
 
 
 @rpc("any_peer", "reliable")
 func rpc_bomb() -> void:
-	if Net.is_server and sim != null and state == "round":
-		sim.request_bomb(_sender())
+	var r: Node = _room_of(_sender()) if Net.is_server else null
+	if r != null:
+		r.bomb(_sender())
 
 
 @rpc("any_peer", "reliable")
 func rpc_action() -> void:
-	if Net.is_server and sim != null and state == "round":
-		sim.request_action(_sender())
+	var r: Node = _room_of(_sender()) if Net.is_server else null
+	if r != null:
+		r.action(_sender())
 
 
 # =================================================================== RPC: servidor -> clientes
 @rpc("authority", "reliable")
-func rpc_lobby(list: Array, leader: int, st: String, w: int, t: int, share: String, share_fixed: bool) -> void:
-	if Net.is_dedicated or view == null:
+func rpc_lobby(list: Array, leader: int, st: String, w: int, t: int, share: String, share_fixed: bool,
+		room_name: String, code: String) -> void:
+	if Net.is_dedicated or view == null or _leaving:
 		return
+	cl_room_name = room_name
+	cl_room_code = code
 	cl_share_url = share
 	cl_share_fixed = share_fixed
 	cl_players = list
@@ -598,12 +545,61 @@ func rpc_lobby(list: Array, leader: int, st: String, w: int, t: int, share: Stri
 		_to_server(&"rpc_start", [])
 
 
+## Lista de salas (só chega para quem está fora de sala).
 @rpc("authority", "reliable")
-func rpc_rejected(msg: String) -> void:
+func rpc_rooms(list: Array, max_rooms: int) -> void:
+	if Net.is_dedicated or view == null:
+		return
+	_leaving = false
+	cl_rooms = list
+	cl_max_rooms = max_rooms
+	if screen == "menu":
+		_show("rooms")
+		rooms_status.text = ""
+	_refresh_rooms()
+	if not _rooms_first:
+		return
+	_rooms_first = false
+	if invite_code != "":
+		# link de convite: entra direto na sala (pede a senha se tiver)
+		var code := invite_code
+		invite_code = ""
+		var e := _room_entry(code)
+		if e.is_empty():
+			rooms_status.text = "A sala do convite não existe mais. Escolha outra ou crie uma."
+		else:
+			_on_room_pressed(e)
+	elif args.has("autojoin"):
+		# teste: entra na sala --room (ou cria, se não existir)
+		var rname := str(args.get("room", "Teste"))
+		for e in list:
+			if String(e[1]).to_lower() == rname.to_lower():
+				_to_server(&"rpc_join_room", [e[0], str(args.get("room-pass", "")), player_name])
+				return
+		_to_server(&"rpc_create_room", [rname, str(args.get("room-pass", "")), player_name])
+
+
+@rpc("authority", "reliable")
+func rpc_room_error(msg: String, code: String, need_pw: bool) -> void:
+	if Net.is_dedicated or view == null:
+		return
+	if screen != "rooms":
+		_show("rooms")
+	rooms_status.text = msg
+	if args.has("autojoin"):
+		print("[cliente] erro de sala: %s" % msg)
+	if need_pw and code != "":
+		_ask_password(code, msg)
+
+
+## Saiu da sala por ordem do servidor (líder encerrou a sala): volta para a lista.
+@rpc("authority", "reliable")
+func rpc_left_room(msg: String) -> void:
 	if view == null:
 		return
-	_on_leave_pressed()
-	status_label.text = msg
+	_reset_room_state()
+	_show("rooms")
+	rooms_status.text = msg
 	if args.has("autojoin"):
 		print("[cliente] removido da sala: %s" % msg)
 		if args.has("autoquit"):
@@ -612,11 +608,12 @@ func rpc_rejected(msg: String) -> void:
 
 @rpc("authority", "reliable")
 func rpc_round_start(n: int, ids: Array, w: Dictionary) -> void:
-	if Net.is_dedicated or view == null:
+	if Net.is_dedicated or view == null or _leaving:
 		return
 	cl_roster = ids
 	cl_wins = w
 	cl_state = "round"
+	cl_map = [PackedByteArray(), PackedByteArray()]
 	view.reset()
 	view.my_id = my_id
 	dir_stack.clear()
@@ -636,13 +633,52 @@ func rpc_round_start(n: int, ids: Array, w: Dictionary) -> void:
 		_to_server(&"rpc_bomb")
 
 
+## Snapshot compacto (scripts/snapshot_codec.gd). O mapa só vem quando muda: fica em cl_map.
 @rpc("authority", "unreliable_ordered")
-func rpc_snapshot(s: Array) -> void:
-	if Net.is_dedicated or view == null:
+func rpc_snapshot(data: PackedByteArray) -> void:
+	if Net.is_dedicated or view == null or _leaving:
 		return
 	_snap_count += 1
-	view.apply(s)
-	_update_hud(s)
+	_stat_snaps += 1
+	_stat_bytes += data.size()
+	var r := Codec.decode(data, cl_map)
+	if r.is_empty():
+		return
+	view.push_snapshot(r[0], r[1])
+	_update_hud(r[1])
+
+
+## Ping: o cliente manda o próprio relógio e o servidor devolve só para ele.
+@rpc("any_peer", "unreliable")
+func rpc_ping(ms: int) -> void:
+	if Net.is_server:
+		_send_to(_sender(), &"rpc_pong", [ms])
+
+
+@rpc("authority", "unreliable")
+func rpc_pong(ms: int) -> void:
+	if view == null:
+		return
+	ping_ms = Time.get_ticks_msec() - ms
+	hud_ping.text = "ping %d ms" % ping_ms
+	hud_ping.modulate = Color(0.5, 1, 0.5) if ping_ms < 80 else (Color(1, 0.9, 0.3) if ping_ms < 160 else Color(1, 0.4, 0.35))
+
+
+func _net_tick() -> void:
+	if Net.is_server or multiplayer.multiplayer_peer == null \
+			or multiplayer.multiplayer_peer is OfflineMultiplayerPeer \
+			or multiplayer.multiplayer_peer.get_connection_status() != MultiplayerPeer.CONNECTION_CONNECTED:
+		hud_ping.text = ""
+		return
+	_to_server(&"rpc_ping", [Time.get_ticks_msec()])
+	_stat_secs += 2
+	if args.has("net-stats") and _stat_secs >= 6:
+		print("[rede] %.1f snapshots/s • %d B em média • buffer %d • engasgos %d • ping %d ms" % [
+			_stat_snaps / float(_stat_secs), _stat_bytes / maxi(1, _stat_snaps),
+			view._buf.size(), view.underruns, ping_ms])
+		_stat_secs = 0
+		_stat_snaps = 0
+		_stat_bytes = 0
 
 
 @rpc("authority", "reliable")
@@ -714,7 +750,8 @@ func _connect_to(url: String) -> void:
 func _on_connected() -> void:
 	my_id = multiplayer.get_unique_id()
 	status_label.text = "Conectado!"
-	_to_server(&"rpc_join", [player_name])
+	_rooms_first = true
+	_to_server(&"rpc_list_rooms")
 	await get_tree().create_timer(5.0).timeout
 	if screen == "menu" and multiplayer.multiplayer_peer is WebSocketMultiplayerPeer:
 		status_label.text = "O servidor não respondeu. Sua versão do jogo pode estar desatualizada:\nrecarregue a página (Ctrl+F5) e tente de novo."
@@ -732,6 +769,8 @@ func _on_server_disconnected() -> void:
 	Net.leave()
 	if view == null:
 		return
+	_reset_room_state()
+	_leaving = false
 	_show("menu")
 	status_label.text = "A conexão com o servidor caiu."
 	if args.has("autoquit"):
@@ -751,7 +790,8 @@ func _on_host_pressed() -> void:
 	_save_settings()
 	if _start_server(G.DEFAULT_PORT, false, null):
 		my_id = 1
-		_server_join(1, player_name)
+		_rooms_first = true
+		_to_server(&"rpc_list_rooms")
 
 
 func _on_dedicated_pressed() -> void:
@@ -760,15 +800,36 @@ func _on_dedicated_pressed() -> void:
 		status_label.text = "Servidor dedicado rodando na porta %d.\nAbra o jogo em outra janela/navegador para jogar." % G.DEFAULT_PORT
 
 
-func _on_leave_pressed() -> void:
+## "SAIR" da sala de espera: volta para a lista de salas (continua conectado).
+func _on_leave_room_pressed() -> void:
+	_reset_room_state()
+	_leaving = true   # ignora mensagens da sala que ainda estejam a caminho
+	_to_server(&"rpc_leave_room")
+	_show("rooms")
+	rooms_status.text = ""
+
+
+func _reset_room_state() -> void:
+	cl_players = []
+	cl_roster = []
+	cl_leader = 0
+	cl_room_name = ""
+	cl_room_code = ""
+	cl_state = "lobby"
+	auto_started = false
+	if view != null:
+		view.reset()
+
+
+## "VOLTAR" na lista de salas: desconecta e volta ao menu.
+func _on_back_pressed() -> void:
 	Net.leave()
-	if sim != null:
-		sim.queue_free()
-		sim = null
-	lobby.clear()
-	order.clear()
-	wins.clear()
-	state = "lobby"
+	for c in rooms:
+		rooms[c].queue_free()
+	rooms.clear()
+	peer_room.clear()
+	_reset_room_state()
+	_leaving = false
 	my_id = 0
 	host_box.visible = not OS.has_feature("web")
 	_show("menu")
@@ -776,6 +837,12 @@ func _on_leave_pressed() -> void:
 
 
 # =================================================================== CLIENTE: entrada
+func _physics_process(_delta: float) -> void:
+	# (a simulação de cada sala roda em room.gd; aqui só o envio dos comandos)
+	if view != null and screen == "game" and my_id in cl_roster:
+		_send_input()
+
+
 func _send_input() -> void:
 	var d := Vector2i.ZERO
 	if not dir_stack.is_empty():
@@ -913,6 +980,7 @@ func _build_ui() -> void:
 	layer.add_child(ui)
 	show_fs = Net.is_touch() and Net.fullscreen_supported()
 	_build_menu()
+	_build_rooms()
 	_build_lobby()
 	_build_hud()
 	_build_overlay()
@@ -1043,6 +1111,188 @@ func _build_menu() -> void:
 	root.add_child(MenuStyle.Scanlines.new())
 
 
+## Tela de salas: entrar em uma sala da lista ou criar uma nova (nome + senha opcional).
+func _build_rooms() -> void:
+	var root := Control.new()
+	root.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	root.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	ui.add_child(root)
+	screens["rooms"] = root
+	root.add_child(MenuStyle.Background.new())
+	var center := CenterContainer.new()
+	center.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	center.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	root.add_child(center)
+	var vb := VBoxContainer.new()
+	vb.add_theme_constant_override("separation", 12)
+	center.add_child(vb)
+	var title := MenuStyle.Title.new()
+	title.text = "SALAS"
+	title.font_size = 58
+	title.custom_minimum_size.x = 960
+	vb.add_child(title)
+
+	var cols := HBoxContainer.new()
+	cols.add_theme_constant_override("separation", 24)
+	vb.add_child(cols)
+
+	# ---- esquerda: salas criadas
+	var lp := MenuStyle.panel(MenuStyle.PINK)
+	lp.custom_minimum_size.x = 560
+	cols.add_child(lp)
+	var left := VBoxContainer.new()
+	left.add_theme_constant_override("separation", 8)
+	lp.add_child(left)
+	left.add_child(MenuStyle.label("ENTRAR EM UMA SALA", 20, MenuStyle.PINK))
+	var scroll := ScrollContainer.new()
+	scroll.custom_minimum_size = Vector2(520, 320)
+	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	MenuStyle.style_scroll(scroll)
+	left.add_child(scroll)
+	rooms_list = VBoxContainer.new()
+	rooms_list.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	rooms_list.add_theme_constant_override("separation", 8)
+	scroll.add_child(rooms_list)
+
+	# ---- direita: criar sala
+	var rp := MenuStyle.panel(MenuStyle.CYAN)
+	rp.custom_minimum_size.x = 380
+	cols.add_child(rp)
+	var right := VBoxContainer.new()
+	right.add_theme_constant_override("separation", 8)
+	rp.add_child(right)
+	right.add_child(MenuStyle.label("CRIAR SALA", 20, MenuStyle.CYAN))
+	right.add_child(MenuStyle.label("NOME DA SALA", 16, MenuStyle.YELLOW, 4))
+	room_name_edit = LineEdit.new()
+	room_name_edit.max_length = ROOM_NAME_MAX
+	room_name_edit.placeholder_text = "ex.: Sala do TI"
+	MenuStyle.style_line_edit(room_name_edit, 20)
+	right.add_child(room_name_edit)
+	right.add_child(MenuStyle.label("SENHA (OPCIONAL)", 16, MenuStyle.YELLOW, 4))
+	room_pass_edit = LineEdit.new()
+	room_pass_edit.max_length = ROOM_PASS_MAX
+	room_pass_edit.secret = true
+	room_pass_edit.placeholder_text = "deixe vazio para sala aberta"
+	MenuStyle.style_line_edit(room_pass_edit, 20)
+	right.add_child(room_pass_edit)
+	room_name_edit.text_submitted.connect(func(_t): _on_create_pressed())
+	room_pass_edit.text_submitted.connect(func(_t): _on_create_pressed())
+	var gap := Control.new()
+	gap.custom_minimum_size.y = 6
+	right.add_child(gap)
+	create_btn = MenuStyle.NeonButton.new("CRIAR SALA", 28, true)
+	create_btn.pressed.connect(_on_create_pressed)
+	right.add_child(create_btn)
+	rooms_count = MenuStyle.label("", 16, Color(1, 1, 1, 0.85), 4)
+	rooms_count.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	right.add_child(rooms_count)
+
+	rooms_status = MenuStyle.label("", 17, MenuStyle.YELLOW, 5)
+	rooms_status.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	rooms_status.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	rooms_status.custom_minimum_size.x = 900
+	vb.add_child(rooms_status)
+	var back := MenuStyle.NeonButton.new("VOLTAR", 22)
+	back.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
+	back.pressed.connect(_on_back_pressed)
+	vb.add_child(back)
+	root.add_child(MenuStyle.Scanlines.new())
+
+	# diálogo de senha (sala protegida)
+	pw_dialog = ConfirmationDialog.new()
+	pw_dialog.title = "Sala com senha"
+	pw_dialog.ok_button_text = "Entrar"
+	pw_dialog.cancel_button_text = "Cancelar"
+	var pv := VBoxContainer.new()
+	pv.add_theme_constant_override("separation", 8)
+	pw_label = Label.new()
+	pv.add_child(pw_label)
+	pw_edit = LineEdit.new()
+	pw_edit.secret = true
+	pw_edit.max_length = ROOM_PASS_MAX
+	pw_edit.custom_minimum_size.x = 320
+	pv.add_child(pw_edit)
+	pw_dialog.add_child(pv)
+	pw_dialog.register_text_enter(pw_edit)
+	pw_dialog.confirmed.connect(func():
+		_to_server(&"rpc_join_room", [_pw_code, pw_edit.text, player_name]))
+	ui.add_child(pw_dialog)
+
+
+func _room_entry(code: String) -> Array:
+	for e in cl_rooms:
+		if e[0] == code:
+			return e
+	return []
+
+
+func _refresh_rooms() -> void:
+	for c in rooms_list.get_children():
+		c.queue_free()
+	if cl_rooms.is_empty():
+		var l := MenuStyle.label("NENHUMA SALA CRIADA AINDA.\nCRIE A SUA AO LADO!", 18, Color(1, 1, 1, 0.75), 4)
+		l.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		l.custom_minimum_size.y = 120
+		l.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+		rooms_list.add_child(l)
+	for e in cl_rooms:
+		var hb := HBoxContainer.new()
+		hb.add_theme_constant_override("separation", 12)
+		var info := VBoxContainer.new()
+		info.add_theme_constant_override("separation", 0)
+		info.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		info.add_child(MenuStyle.label(String(e[1]).to_upper(), 20))
+		var parts := PackedStringArray()
+		parts.append("%d/%d JOGADORES" % [int(e[3]), int(e[4])])
+		parts.append("EM JOGO" if e[5] else "ESPERANDO")
+		if e[2]:
+			parts.append("COM SENHA")
+		info.add_child(MenuStyle.label("  •  ".join(parts), 14,
+			MenuStyle.PINK if e[5] else MenuStyle.CYAN, 3))
+		hb.add_child(info)
+		var btn := MenuStyle.NeonButton.new("ENTRAR", 22, false, MenuStyle.YELLOW)
+		btn.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+		btn.pressed.connect(_on_room_pressed.bind(e))
+		btn.disabled = int(e[3]) >= int(e[4]) and e[5]
+		hb.add_child(btn)
+		rooms_list.add_child(hb)
+	rooms_count.text = "SALAS CRIADAS: %d/%d" % [cl_rooms.size(), cl_max_rooms]
+	create_btn.disabled = cl_rooms.size() >= cl_max_rooms
+	create_btn.modulate.a = 0.4 if create_btn.disabled else 1.0
+
+
+func _on_room_pressed(e: Array) -> void:
+	rooms_status.text = ""
+	if e[2]:
+		_ask_password(e[0], "")
+	else:
+		_to_server(&"rpc_join_room", [e[0], "", player_name])
+
+
+func _ask_password(code: String, msg: String) -> void:
+	_pw_code = code
+	var e := _room_entry(code)
+	var rname: String = e[1] if not e.is_empty() else code
+	var txt := "Digite a senha da sala \"%s\":" % rname
+	if msg.begins_with("Senha incorreta"):
+		txt = "Senha incorreta. Tente de novo:"
+	pw_label.text = txt
+	pw_edit.text = ""
+	pw_dialog.popup_centered()
+	pw_edit.grab_focus()
+
+
+func _on_create_pressed() -> void:
+	var rname := room_name_edit.text.strip_edges()
+	if rname == "":
+		rooms_status.text = "Dê um nome para a sala."
+		room_name_edit.grab_focus()
+		return
+	rooms_status.text = ""
+	_to_server(&"rpc_create_room", [rname, room_pass_edit.text, player_name])
+	room_pass_edit.text = ""
+
+
 func _build_lobby() -> void:
 	# mesmo visual neon do menu (scripts/menu_style.gd)
 	var root := Control.new()
@@ -1063,6 +1313,7 @@ func _build_lobby() -> void:
 	title.font_size = 58
 	title.custom_minimum_size.x = 960
 	vb.add_child(title)
+	lobby_title = title
 
 	var lb := HBoxContainer.new()
 	lb.add_theme_constant_override("separation", 12)
@@ -1141,7 +1392,7 @@ func _build_lobby() -> void:
 	leader_box.add_child(close_btn)
 	close_dialog = ConfirmationDialog.new()
 	close_dialog.title = "Encerrar sala"
-	close_dialog.dialog_text = "Todos os jogadores serão desconectados e a sala será zerada.\nDeseja continuar?"
+	close_dialog.dialog_text = "Todos os jogadores voltam para a lista de salas e esta sala será excluída.\nDeseja continuar?"
 	close_dialog.ok_button_text = "Encerrar"
 	close_dialog.cancel_button_text = "Cancelar"
 	close_dialog.confirmed.connect(func(): _to_server(&"rpc_close_room"))
@@ -1150,7 +1401,7 @@ func _build_lobby() -> void:
 	wait_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	left.add_child(wait_label)
 	var leave := MenuStyle.NeonButton.new("SAIR", 22)
-	leave.pressed.connect(_on_leave_pressed)
+	leave.pressed.connect(_on_leave_room_pressed)
 	left.add_child(leave)
 
 	# ---- direita: legenda dos itens
@@ -1220,6 +1471,14 @@ func _build_hud() -> void:
 	hud_stats.offset_left = 12
 	hud_stats.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	hud.add_child(hud_stats)
+	hud_ping = _label("", 13)
+	hud_ping.set_anchors_and_offsets_preset(Control.PRESET_BOTTOM_RIGHT)
+	hud_ping.offset_left = -110
+	hud_ping.offset_top = -26
+	hud_ping.offset_right = -12
+	hud_ping.offset_bottom = -6
+	hud_ping.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	hud.add_child(hud_ping)
 
 
 func _build_overlay() -> void:
@@ -1358,21 +1617,41 @@ func _refresh_lobby() -> void:
 	time_value.text = _fmt_time(cl_cfg_time)
 	var n := cl_players.size()
 	start_btn.text = "INICIAR PARTIDA (%d JOGADOR%s)" % [n, "" if n == 1 else "ES"]
+	lobby_title.text = "SALA " + cl_room_name.to_upper() if cl_room_name != "" else "SALA DE ESPERA"
 	var link := _invite_link()
 	link_box.visible = link != ""
 	link_edit.text = link
 
 
-## Link que os outros devem abrir. Usa o endereço da página, a não ser que ela
-## tenha sido aberta por localhost (aí usa o IP da rede informado pelo servidor).
+## Link que os outros devem abrir (já entra direto nesta sala: ?sala=CÓDIGO).
+## Usa o endereço da página, a não ser que ela tenha sido aberta por localhost
+## (aí usa o IP da rede informado pelo servidor).
 func _invite_link() -> String:
+	var base := Net.page_url()
+	var local := base == "" or base.contains("://localhost") or base.contains("://127.0.0.1")
 	if cl_share_fixed and cl_share_url != "":
-		return cl_share_url
-	var page := Net.page_url()
-	var local := page == "" or page.contains("://localhost") or page.contains("://127.0.0.1")
-	if local and cl_share_url != "":
-		return cl_share_url
-	return page
+		base = cl_share_url
+	elif local and cl_share_url != "":
+		base = cl_share_url
+	if base == "":
+		return ""
+	return _with_param(base, "sala", cl_room_code) if cl_room_code != "" else base
+
+
+## Troca/acrescenta ?chave=valor numa URL, mantendo os outros parâmetros (ex.: ?server=).
+func _with_param(url: String, key: String, val: String) -> String:
+	var h := url.find("#")
+	if h >= 0:
+		url = url.substr(0, h)
+	var q := url.find("?")
+	var base := url if q < 0 else url.substr(0, q)
+	var parts := PackedStringArray()
+	if q >= 0:
+		for p in url.substr(q + 1).split("&", false):
+			if not p.begins_with(key + "="):
+				parts.append(p)
+	parts.append("%s=%s" % [key, val.uri_encode()])
+	return base + "?" + "&".join(parts)
 
 
 func _on_copy_pressed() -> void:
