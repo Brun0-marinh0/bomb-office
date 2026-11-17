@@ -12,12 +12,15 @@ const SNOW_FADE := 0.3          # depois o chuvisco some aos poucos
 const FLASH := 0.15             # chuvisco rápido na troca de tela
 const BARREL_GAME := 0.10       # olho-de-peixe na partida
 const BARREL_MENU := 0.06       # mais leve nos menus, para o clique não desalinhar dos botões
+const BOOM_GLITCH := 0.2        # força da falha numa explosão (a troca de tela usa 0.9)
+const BOOM_WINDOW := 0.6        # explosões dentro deste intervalo (s) geram uma falha só
 
 var screen := "menu"
 var room_name := ""
 var cam := 1
 var t := 0.0
 var _glitch := 0.0
+var _last_boom := -10.0         # instante da última falha por explosão
 var _flash := 0.0
 var _cut_t := -1.0              # tempo desde a troca de câmera (-1 = nenhuma em andamento)
 var _mat: ShaderMaterial
@@ -51,9 +54,13 @@ func set_room(n: String) -> void:
 	room_name = n
 
 
-## Explosão: a imagem falha por um instante (explosões em cadeia somam).
-func glitch(amount := 0.35) -> void:
-	_glitch = minf(1.0, _glitch + amount)
+## Explosão: a imagem falha de leve por um instante. Explosões próximas no tempo
+## (em cadeia ou de vários jogadores) contam como uma só falha, sem somar.
+func glitch(amount := BOOM_GLITCH) -> void:
+	if t - _last_boom < BOOM_WINDOW:
+		return
+	_last_boom = t
+	_glitch = maxf(_glitch, amount)
 
 
 ## Troca de tela: falha forte com um chuvisco rápido.
