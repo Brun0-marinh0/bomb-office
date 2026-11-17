@@ -53,10 +53,15 @@ func default_url() -> String:
 
 
 func url_has_server_param() -> bool:
+	return url_param("server") != ""
+
+
+## Parâmetro da URL da página (?server=..., ?sala=...). Fora da web, "".
+func url_param(name: String) -> String:
 	if not OS.has_feature("web"):
-		return false
-	var q = JavaScriptBridge.eval("new URLSearchParams(window.location.search).get('server') || ''", true)
-	return q is String and q != ""
+		return ""
+	var q = JavaScriptBridge.eval("new URLSearchParams(window.location.search).get(%s) || ''" % JSON.stringify(name), true)
+	return q if q is String else ""
 
 
 ## Copia texto. Na web funciona também sem HTTPS (fallback com execCommand).

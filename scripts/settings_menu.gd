@@ -30,7 +30,7 @@ static func setup_buses() -> void:
 
 
 static func apply_volumes(music: float, sfx: float) -> void:
-	# na web sem HTTPS o som sai pelo WebAudio, com volume próprio
+	# na web a música (e, sem HTTPS, os efeitos) sai pelo WebAudio, com volume próprio
 	preload("res://scripts/web_audio.gd").set_volumes(clampf(music, 0.0, 1.0), clampf(sfx, 0.0, 1.0))
 	for pair in [[BUS_MUSIC, music], [BUS_SFX, sfx]]:
 		var i := AudioServer.get_bus_index(pair[0])
