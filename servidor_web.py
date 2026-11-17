@@ -4,10 +4,23 @@ Uso: python servidor_web.py [porta=8060] [pasta=build/web] [endereco=0.0.0.0]
 """
 import functools
 import http.server
+import os
 import sys
 
 
+PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
+
+
 class NoCacheHandler(http.server.SimpleHTTPRequestHandler):
+    def translate_path(self, path):
+        # sons soltos (usados pelo web_audio.gd em http://) vêm direto da pasta do projeto
+        clean = path.split("?", 1)[0].split("#", 1)[0]
+        if clean.startswith("/assets/sounds/"):
+            local = os.path.normpath(os.path.join(PROJECT_ROOT, *clean.lstrip("/").split("/")))
+            if local.startswith(os.path.join(PROJECT_ROOT, "assets", "sounds")):
+                return local
+        return super().translate_path(path)
+
     def end_headers(self):
         self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
         self.send_header("Expires", "0")

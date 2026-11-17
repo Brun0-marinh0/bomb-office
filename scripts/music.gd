@@ -4,6 +4,7 @@ extends Node
 ## quando a partida começa, abaixa o volume aos poucos até 0 e para.
 ## Para adicionar músicas, basta colocar mais arquivos .ogg na pasta.
 
+const WebAudio = preload("res://scripts/web_audio.gd")
 const DIR := "res://assets/sounds/intro"
 const EXTS := ["ogg", "mp3"]
 const VOLUME_DB := -6.0
@@ -15,6 +16,7 @@ var _tracks: Array[String] = []
 var _last := ""
 var _tween: Tween
 var _fading_out := false
+var _web_playing := false   # tocando pelo WebAudio (navegador sem AudioWorklet)
 
 
 func _ready() -> void:
@@ -26,6 +28,9 @@ func _ready() -> void:
 ## Começa (ou continua) a música de entrada. Se estiver sumindo, volta ao normal.
 func play_intro() -> void:
 	if _tracks.is_empty():
+		return
+	if WebAudio.active():
+		_play_intro_web()
 		return
 	if player.playing and not _fading_out:
 		return
@@ -50,9 +55,37 @@ func play_intro() -> void:
 
 ## A partida começou: abaixa o volume até 0 e para.
 func fade_out() -> void:
+	if WebAudio.active():
+		if _web_playing and not _fading_out:
+			_fading_out = true
+			WebAudio.fade_music(0.0, FADE_OUT, true)
+			get_tree().create_timer(FADE_OUT).timeout.connect(func():
+				if _fading_out:
+					_web_playing = false
+					_fading_out = false
+					print("[musica] parou (partida começou)"))
+		return
 	if not player.playing or _fading_out:
 		return
 	_fade_to(-80.0, FADE_OUT, true)
+
+
+## Mesmo comportamento de play_intro(), tocando pelo WebAudio.
+func _play_intro_web() -> void:
+	if _web_playing and not _fading_out:
+		return
+	if _web_playing and _fading_out:
+		_fading_out = false
+		WebAudio.fade_music(db_to_linear(VOLUME_DB), FADE_IN, false)
+		return
+	var choices := _tracks.duplicate()
+	if choices.size() > 1:
+		choices.erase(_last)
+	_last = choices.pick_random()
+	WebAudio.play_music(_last, db_to_linear(VOLUME_DB), FADE_IN)
+	_web_playing = true
+	_fading_out = false
+	print("[musica] tocando %s (web audio)" % _last.get_file())
 
 
 func _fade_to(db: float, secs: float, stop_after: bool) -> void:

@@ -3,6 +3,7 @@ extends Node2D
 ## Tudo é desenhado com texturas 32x32 vindas do autoload Sprites.
 
 const G = preload("res://scripts/g.gd")
+const WebAudio = preload("res://scripts/web_audio.gd")
 
 var has_data := false
 var tiles := PackedByteArray()
@@ -25,6 +26,7 @@ var winner := 0      # vencedor da rodada (animação de comemoração)
 const WALL_DECOR := {3: "wall_notice_board", 5: "wall_air_conditioner", 8: "wall_clock", 11: "wall_air_conditioner", 13: "wall_notice_board"}
 
 const SOFT_FPS := 10.0  # animação da mesa (bloco destrutível), assets/sprites/deskOffice/
+const BOMB_FPS := 10.0  # animação da bomba, assets/sprites/bomb/
 const ANIM_FPS := {"walk": 12.0, "place_bomb": 16.0, "throw": 18.0, "dizzy": 8.0, "death": 12.0, "victory": 6.0}
 
 ## Efeitos sonoros (assets/sounds/). Se o arquivo não existir, o jogo segue sem som.
@@ -38,11 +40,16 @@ func _ready() -> void:
 	sfx_boom.bus = "Efeitos"   # volume ajustado em Configurações (settings_menu.gd)
 	if ResourceLoader.exists(SFX_EXPLOSION):
 		sfx_boom.stream = load(SFX_EXPLOSION)
+		WebAudio.preload_sound(SFX_EXPLOSION)
 	add_child(sfx_boom)
 
 
 func play_boom() -> void:
-	if sfx_boom.stream != null:
+	if sfx_boom.stream == null:
+		return
+	if WebAudio.active():
+		WebAudio.play_sfx(SFX_EXPLOSION)
+	else:
 		sfx_boom.play()
 
 
@@ -234,7 +241,9 @@ func _draw() -> void:
 
 	# ---- bombas
 	var btex := Sprites.tex("bomb")
-	var bomb_custom := Sprites.is_custom("bomb")
+	var bomb_anim: Array = Sprites.seq("bomb/bomb_")   # assets/sprites/bomb/bomb_01.png...
+	var bomb_custom := Sprites.is_custom("bomb") or not bomb_anim.is_empty()
+	var remote_anim: Array = Sprites.seq("clock_bomb/clock_bomb_")   # bomba do Controle Remoto
 	for e in bombs:
 		var id: int = e[0]
 		var pos: Vector2 = bdisp.get(id, Vector2(e[1], e[2]))
@@ -253,8 +262,18 @@ func _draw() -> void:
 			tint = Color(0.85, 0.55, 1.0)
 		if (kind & 4) != 0:
 			tint = Color(1.0, 0.5, 0.5)
-		draw_texture_rect(btex, Rect2(c - Vector2(sz, sz) * 0.5, Vector2(sz, sz)), false, tint)
-		if not bomb_custom:
+		var bt: Texture2D = btex
+		var remote := (kind & 1) != 0 and not remote_anim.is_empty()
+		if remote:
+			# relógio: só explode quando o dono aperta AÇÃO; sprite próprio, sem tinta azul
+			bt = remote_anim[int(t * BOMB_FPS + id) % remote_anim.size()]
+			if (kind & 4) == 0:
+				tint = Color.WHITE
+		elif not bomb_anim.is_empty():
+			# pavio aceso; cada bomba começa num quadro diferente
+			bt = bomb_anim[int(t * BOMB_FPS + id) % bomb_anim.size()]
+		draw_texture_rect(bt, Rect2(c - Vector2(sz, sz) * 0.5, Vector2(sz, sz)), false, tint)
+		if not bomb_custom and not remote:
 			if (kind & 1) != 0:
 				draw_rect(Rect2(c - Vector2(2, 2), Vector2(4, 4)), Color(1, 0.2, 0.2) if int(t * 4) % 2 == 0 else Color(0.4, 0, 0))
 			elif int(t * 10) % 2 == 0:
