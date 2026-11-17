@@ -9,6 +9,15 @@ Projeto sem fins comerciais, para apresentação.
 - **Clientes** (navegador, PC ou celular): enviam só os comandos (direção, bomba, ação) e desenham a arena.
 - Comunicação por **WebSocket** (`ws://` local, `wss://` na internet).
 - Tudo é desenhado com blocos 32x32 — para trocar por sprites, veja [assets/sprites/LEIA-ME.md](assets/sprites/LEIA-ME.md).
+- Os menus são uma **central de monitoramento** ([scripts/menu_style.gd](scripts/menu_style.gd)):
+  - inicialização do "DVR" ao abrir (clique/tecla pula)
+  - mosaico de 4 câmeras do escritório no fundo (às vezes uma perde o sinal ou alguém passa)
+  - fonte de terminal VT323 ([assets/fonts](assets/fonts), licença OFL)
+  - botões de DVR e destaque âmbar
+  - o mesmo filtro de câmera da partida, com glitch a cada troca de tela
+- A partida aparece como **imagem de câmera de vigilância** ([scripts/cctv.gd](scripts/cctv.gd) + [shaders/cctv.gdshader](shaders/cctv.gdshader)):
+  `● REC`, câmera e sala, data/hora, lente olho-de-peixe, linhas de TV, granulado, glitch nas explosões e
+  chuvisco "SEM SINAL" na troca de rodada. O HUD fica nítido por cima.
 
 ## Testar no PC (sem exportar)
 
@@ -187,6 +196,8 @@ scripts/room.gd           uma sala no servidor: lobby, placar, rodadas e a simul
 scripts/server_game.gd    simulação autoritativa + IA dos bots
 scripts/game_view.gd      desenho da arena (buffer de interpolação dos snapshots)
 scripts/snapshot_codec.gd snapshot compacto em bytes (servidor -> clientes)
+scripts/cctv.gd           câmera de vigilância em todas as telas (OSD + filtro shaders/cctv.gdshader)
+scripts/menu_style.gd     visual dos menus: mosaico de câmeras, botões de DVR, fonte VT323
 scripts/web_audio.gd      música em streaming e efeitos pela Web Audio API (navegador)
 scripts/g.gd              constantes e regras (ajuste o balanceamento aqui)
 scripts/net.gd            conexão WebSocket (autoload Net)

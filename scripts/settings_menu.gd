@@ -56,13 +56,13 @@ func _ready() -> void:
 	center.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	center.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	add_child(center)
-	var panel := MenuStyle.panel(MenuStyle.PINK)
+	var panel := MenuStyle.panel(MenuStyle.AMBER)
 	panel.custom_minimum_size.x = 560
 	center.add_child(panel)
 	var vb := VBoxContainer.new()
 	vb.add_theme_constant_override("separation", 16)
 	panel.add_child(vb)
-	var title := MenuStyle.label("CONFIGURAÇÕES", 40, MenuStyle.PINK, 8)
+	var title := MenuStyle.label("CONFIGURAÇÕES", 40, MenuStyle.AMBER, 8)
 	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	vb.add_child(title)
 	var r1 := _slider_row("MÚSICA", music_vol)
@@ -78,7 +78,7 @@ func _ready() -> void:
 	_sfx_slider.drag_ended.connect(func(_c):
 		if test_sfx.is_valid():
 			test_sfx.call())
-	var close_btn := MenuStyle.NeonButton.new("FECHAR", 30, true)
+	var close_btn := MenuStyle.DvrButton.new("FECHAR", 30, true)
 	close_btn.pressed.connect(close)
 	vb.add_child(close_btn)
 
@@ -116,7 +116,7 @@ func _update_labels() -> void:
 func _slider_row(text: String, value: float) -> Array:
 	var row := HBoxContainer.new()
 	row.add_theme_constant_override("separation", 16)
-	var l := MenuStyle.label(text, 24, MenuStyle.YELLOW)
+	var l := MenuStyle.label(text, 24, MenuStyle.MUTED)
 	l.custom_minimum_size.x = 130
 	row.add_child(l)
 	var s := HSlider.new()
@@ -145,15 +145,15 @@ func _style_slider(s: HSlider) -> void:
 	track.skew = Vector2(0.3, 0)
 	s.add_theme_stylebox_override("slider", track)
 	var fill := StyleBoxFlat.new()
-	fill.bg_color = MenuStyle.PINK
+	fill.bg_color = MenuStyle.AMBER
 	fill.content_margin_top = 6
 	fill.content_margin_bottom = 6
 	fill.skew = Vector2(0.3, 0)
 	s.add_theme_stylebox_override("grabber_area", fill)
 	var fill_hl := fill.duplicate()
-	fill_hl.bg_color = MenuStyle.CYAN
+	fill_hl.bg_color = MenuStyle.TEXT
 	s.add_theme_stylebox_override("grabber_area_highlight", fill_hl)
-	s.add_theme_icon_override("grabber", _knob(MenuStyle.YELLOW))
+	s.add_theme_icon_override("grabber", _knob(MenuStyle.TEXT))
 	s.add_theme_icon_override("grabber_highlight", _knob(Color.WHITE))
 	s.add_theme_icon_override("grabber_disabled", _knob(Color(0.5, 0.5, 0.5)))
 
