@@ -15,6 +15,7 @@ extends Node
 const G = preload("res://scripts/g.gd")
 const Room = preload("res://scripts/room.gd")
 const Codec = preload("res://scripts/snapshot_codec.gd")
+const CCTV = preload("res://scripts/cctv.gd")
 const ROOM_NAME_MAX := 16
 const ROOM_PASS_MAX := 20
 const CODE_CHARS := "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
@@ -70,6 +71,9 @@ var _leaving := false           # saiu da sala e espera a lista de salas
 
 # ------------------------------------------------------------- UI
 var view: Node2D
+var cctv: CanvasLayer      # filtro de câmera de vigilância em todas as telas (scripts/cctv.gd)
+var menu_ui: Control       # telas de menu (ficam por baixo do filtro da câmera)
+var boot_label: Label
 var ui: Control
 var screens := {}
 var screen := ""
@@ -147,7 +151,10 @@ func _ready() -> void:
 	music.player.bus = SettingsMenu.BUS_MUSIC
 	invite_code = Net.url_param("sala").strip_edges().to_upper()
 	_build_ui()
-	_show("menu")
+	if args.has("autojoin"):
+		_show("menu")      # testes automáticos: sem a inicialização
+	else:
+		_run_boot()
 	var net_timer := Timer.new()
 	net_timer.wait_time = 2.0
 	net_timer.autostart = true
@@ -522,6 +529,7 @@ func rpc_lobby(list: Array, leader: int, st: String, w: int, t: int, share: Stri
 	if Net.is_dedicated or view == null or _leaving:
 		return
 	cl_room_name = room_name
+	cctv.set_room(room_name)
 	cl_room_code = code
 	cl_share_url = share
 	cl_share_fixed = share_fixed
@@ -626,6 +634,7 @@ func rpc_round_start(n: int, ids: Array, w: Dictionary) -> void:
 		var c := _color_of(my_id)
 		txt += "\nVocê é o bloco %s" % G.PLAYER_COLOR_NAMES[c]
 	_show_overlay(txt, 2.0)
+	cctv.round_cut(n)
 	if args.has("autojoin"):
 		print("[cliente] rodada %d começou" % n)
 	if args.has("test-suicide"):   # teste: solta uma bomba e fica parado
@@ -891,6 +900,9 @@ func _key_dir(k: int) -> Vector2i:
 func _unhandled_input(event: InputEvent) -> void:
 	if settings != null and settings.visible:
 		return   # painel de configurações aberto: teclado não controla o jogador
+	if screen == "boot" and event is InputEventKey and event.pressed:
+		_end_boot()   # qualquer tecla pula a inicialização
+		return
 	if screen != "game":
 		return
 	if event is InputEventKey and not event.echo:
@@ -968,8 +980,21 @@ func _make_panel(min_w: float) -> Array:
 
 
 func _build_ui() -> void:
+	# camadas: 0 arena | 1 telas de menu | 2 câmera de vigilância (filtro + OSD, por cima da
+	# arena e dos menus) | 3 UI que fica nítida por cima do filtro (HUD, modal, configurações)
+	var menu_layer := CanvasLayer.new()
+	menu_layer.layer = 1
+	add_child(menu_layer)
+	menu_ui = Control.new()
+	menu_ui.set_anchors_preset(Control.PRESET_FULL_RECT)
+	menu_ui.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	menu_layer.add_child(menu_ui)
+	cctv = CCTV.new()
+	cctv.layer = 2
+	add_child(cctv)
+	view.boomed.connect(func(): cctv.glitch())
 	var layer := CanvasLayer.new()
-	layer.layer = 1
+	layer.layer = 3
 	add_child(layer)
 	ui = Control.new()
 	ui.set_anchors_preset(Control.PRESET_FULL_RECT)
@@ -977,8 +1002,10 @@ func _build_ui() -> void:
 	var th := Theme.new()
 	th.default_font_size = 18
 	ui.theme = th
+	menu_ui.theme = th
 	layer.add_child(ui)
 	show_fs = Net.is_touch() and Net.fullscreen_supported()
+	_build_boot()
 	_build_menu()
 	_build_rooms()
 	_build_lobby()
@@ -1022,14 +1049,53 @@ func _build_ui() -> void:
 		_save_settings())
 
 
+## Inicialização do "sistema de câmeras" ao abrir o jogo (clique/toque/tecla pula).
+func _build_boot() -> void:
+	var root := ColorRect.new()
+	root.color = Color(0.01, 0.012, 0.012)
+	root.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	root.mouse_filter = Control.MOUSE_FILTER_STOP
+	menu_ui.add_child(root)
+	screens["boot"] = root
+	boot_label = MenuStyle.label("", 22, MenuStyle.AMBER, 0)
+	boot_label.position = Vector2(80, 70)
+	root.add_child(boot_label)
+	root.gui_input.connect(func(e):
+		if (e is InputEventMouseButton or e is InputEventScreenTouch) and e.pressed:
+			_end_boot())
+
+
+func _run_boot() -> void:
+	_show("boot")
+	var lines := ["BOMBOFFICE DVR v1.0", "", "INICIALIZANDO SISTEMA DE CÂMERAS..."]
+	for i in 4:
+		lines.append("CAM %02d .......... OK" % (i + 1))
+	lines.append("")
+	lines.append("● GRAVANDO")
+	var shown := PackedStringArray()
+	for l in lines:
+		if screen != "boot":
+			return
+		shown.append(l)
+		boot_label.text = "\n".join(shown)
+		await get_tree().create_timer(0.16 if l != "" else 0.05).timeout
+	await get_tree().create_timer(0.45).timeout
+	_end_boot()
+
+
+func _end_boot() -> void:
+	if screen == "boot":
+		_show("menu")
+
+
 func _build_menu() -> void:
-	# visual neon anos 80: fundo animado, título que balança, botões de texto (scripts/menu_style.gd)
+	# central de monitoramento: mosaico de câmeras, painel de acesso (scripts/menu_style.gd)
 	var root := Control.new()
 	root.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	root.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	ui.add_child(root)
+	menu_ui.add_child(root)
 	screens["menu"] = root
-	root.add_child(MenuStyle.Background.new())
+	root.add_child(MenuStyle.CameraWall.new())
 	var center := CenterContainer.new()
 	center.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	center.mouse_filter = Control.MOUSE_FILTER_IGNORE
@@ -1042,22 +1108,26 @@ func _build_menu() -> void:
 	title.custom_minimum_size.x = 900
 	vb.add_child(title)
 	var sub := Label.new()
-	sub.text = "BATALHA DE BOMBAS ONLINE  •  2 A 8 JOGADORES"
+	sub.text = "SISTEMA DE MONITORAMENTO  •  BATALHA DE BOMBAS  •  2 A 8 JOGADORES"
 	sub.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	MenuStyle.style_label(sub, 20, MenuStyle.CYAN)
+	MenuStyle.style_label(sub, 18, MenuStyle.TEXT)
 	vb.add_child(sub)
 	var gap := Control.new()
-	gap.custom_minimum_size.y = 14
+	gap.custom_minimum_size.y = 8
 	vb.add_child(gap)
+	# painel de "login" do DVR
+	var login := MenuStyle.panel(MenuStyle.MUTED)
+	login.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
+	vb.add_child(login)
 	var col := VBoxContainer.new()
-	col.add_theme_constant_override("separation", 10)
+	col.add_theme_constant_override("separation", 8)
 	col.custom_minimum_size.x = 440
-	col.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
-	vb.add_child(col)
+	login.add_child(col)
+	col.add_child(MenuStyle.label("▸ ACESSO AO SISTEMA", 18, MenuStyle.AMBER))
 	var nl := Label.new()
 	nl.text = "SEU NOME"
 	nl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	MenuStyle.style_label(nl, 18, MenuStyle.YELLOW)
+	MenuStyle.style_label(nl, 18, MenuStyle.MUTED)
 	col.add_child(nl)
 	name_edit = LineEdit.new()
 	name_edit.max_length = 12
@@ -1070,7 +1140,7 @@ func _build_menu() -> void:
 	var sl := Label.new()
 	sl.text = "SERVIDOR"
 	sl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	MenuStyle.style_label(sl, 15, MenuStyle.YELLOW)
+	MenuStyle.style_label(sl, 15, MenuStyle.MUTED)
 	ub.add_child(sl)
 	url_edit = LineEdit.new()
 	url_edit.text = Net.default_url()
@@ -1079,15 +1149,15 @@ func _build_menu() -> void:
 	url_box = ub
 	url_box.visible = not Net.url_has_server_param()
 	col.add_child(url_box)
-	var enter := MenuStyle.NeonButton.new("ENTRAR", 56, true)
+	var enter := MenuStyle.DvrButton.new("ENTRAR", 34, true)
 	enter.pressed.connect(_on_join_pressed)
 	col.add_child(enter)
 	var hb := HBoxContainer.new()
 	hb.alignment = BoxContainer.ALIGNMENT_CENTER
 	hb.add_theme_constant_override("separation", 30)
-	var h1 := MenuStyle.NeonButton.new("HOSPEDAR E JOGAR", 24)
+	var h1 := MenuStyle.DvrButton.new("HOSPEDAR E JOGAR", 24)
 	h1.pressed.connect(_on_host_pressed)
-	var h2 := MenuStyle.NeonButton.new("SERVIDOR DEDICADO", 24)
+	var h2 := MenuStyle.DvrButton.new("SERVIDOR DEDICADO", 24)
 	h2.pressed.connect(_on_dedicated_pressed)
 	hb.add_child(h1)
 	hb.add_child(h2)
@@ -1098,17 +1168,16 @@ func _build_menu() -> void:
 	status_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	status_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	status_label.custom_minimum_size.x = 440
-	MenuStyle.style_label(status_label, 16, MenuStyle.YELLOW)
+	MenuStyle.style_label(status_label, 16, MenuStyle.AMBER)
 	col.add_child(status_label)
 	var help := Label.new()
 	help.text = "Teclado: Setas/WASD movem • Espaço solta bomba • Shift/E ação\nCelular: direcional à esquerda, botões à direita"
 	help.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	MenuStyle.style_label(help, 14, Color(1, 1, 1, 0.8))
+	MenuStyle.style_label(help, 15, MenuStyle.TEXT)
 	help.set_anchors_and_offsets_preset(Control.PRESET_BOTTOM_WIDE)
 	help.offset_top = -56
 	help.offset_bottom = -10
 	root.add_child(help)
-	root.add_child(MenuStyle.Scanlines.new())
 
 
 ## Tela de salas: entrar em uma sala da lista ou criar uma nova (nome + senha opcional).
@@ -1116,9 +1185,9 @@ func _build_rooms() -> void:
 	var root := Control.new()
 	root.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	root.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	ui.add_child(root)
+	menu_ui.add_child(root)
 	screens["rooms"] = root
-	root.add_child(MenuStyle.Background.new())
+	root.add_child(MenuStyle.CameraWall.new())
 	var center := CenterContainer.new()
 	center.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	center.mouse_filter = Control.MOUSE_FILTER_IGNORE
@@ -1137,13 +1206,13 @@ func _build_rooms() -> void:
 	vb.add_child(cols)
 
 	# ---- esquerda: salas criadas
-	var lp := MenuStyle.panel(MenuStyle.PINK)
+	var lp := MenuStyle.panel(MenuStyle.AMBER)
 	lp.custom_minimum_size.x = 560
 	cols.add_child(lp)
 	var left := VBoxContainer.new()
 	left.add_theme_constant_override("separation", 8)
 	lp.add_child(left)
-	left.add_child(MenuStyle.label("ENTRAR EM UMA SALA", 20, MenuStyle.PINK))
+	left.add_child(MenuStyle.label("ENTRAR EM UMA SALA", 20, MenuStyle.AMBER))
 	var scroll := ScrollContainer.new()
 	scroll.custom_minimum_size = Vector2(520, 320)
 	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
@@ -1155,20 +1224,20 @@ func _build_rooms() -> void:
 	scroll.add_child(rooms_list)
 
 	# ---- direita: criar sala
-	var rp := MenuStyle.panel(MenuStyle.CYAN)
+	var rp := MenuStyle.panel(MenuStyle.MUTED)
 	rp.custom_minimum_size.x = 380
 	cols.add_child(rp)
 	var right := VBoxContainer.new()
 	right.add_theme_constant_override("separation", 8)
 	rp.add_child(right)
-	right.add_child(MenuStyle.label("CRIAR SALA", 20, MenuStyle.CYAN))
-	right.add_child(MenuStyle.label("NOME DA SALA", 16, MenuStyle.YELLOW, 4))
+	right.add_child(MenuStyle.label("CRIAR SALA", 20, MenuStyle.AMBER))
+	right.add_child(MenuStyle.label("NOME DA SALA", 16, MenuStyle.MUTED, 4))
 	room_name_edit = LineEdit.new()
 	room_name_edit.max_length = ROOM_NAME_MAX
 	room_name_edit.placeholder_text = "ex.: Sala do TI"
 	MenuStyle.style_line_edit(room_name_edit, 20)
 	right.add_child(room_name_edit)
-	right.add_child(MenuStyle.label("SENHA (OPCIONAL)", 16, MenuStyle.YELLOW, 4))
+	right.add_child(MenuStyle.label("SENHA (OPCIONAL)", 16, MenuStyle.MUTED, 4))
 	room_pass_edit = LineEdit.new()
 	room_pass_edit.max_length = ROOM_PASS_MAX
 	room_pass_edit.secret = true
@@ -1180,23 +1249,22 @@ func _build_rooms() -> void:
 	var gap := Control.new()
 	gap.custom_minimum_size.y = 6
 	right.add_child(gap)
-	create_btn = MenuStyle.NeonButton.new("CRIAR SALA", 28, true)
+	create_btn = MenuStyle.DvrButton.new("CRIAR SALA", 28, true)
 	create_btn.pressed.connect(_on_create_pressed)
 	right.add_child(create_btn)
 	rooms_count = MenuStyle.label("", 16, Color(1, 1, 1, 0.85), 4)
 	rooms_count.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	right.add_child(rooms_count)
 
-	rooms_status = MenuStyle.label("", 17, MenuStyle.YELLOW, 5)
+	rooms_status = MenuStyle.label("", 17, MenuStyle.AMBER, 5)
 	rooms_status.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	rooms_status.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	rooms_status.custom_minimum_size.x = 900
 	vb.add_child(rooms_status)
-	var back := MenuStyle.NeonButton.new("VOLTAR", 22)
+	var back := MenuStyle.DvrButton.new("VOLTAR", 22)
 	back.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
 	back.pressed.connect(_on_back_pressed)
 	vb.add_child(back)
-	root.add_child(MenuStyle.Scanlines.new())
 
 	# diálogo de senha (sala protegida)
 	pw_dialog = ConfirmationDialog.new()
@@ -1216,6 +1284,7 @@ func _build_rooms() -> void:
 	pw_dialog.register_text_enter(pw_edit)
 	pw_dialog.confirmed.connect(func():
 		_to_server(&"rpc_join_room", [_pw_code, pw_edit.text, player_name]))
+	pw_dialog.theme = MenuStyle.dialog_theme()
 	ui.add_child(pw_dialog)
 
 
@@ -1248,9 +1317,9 @@ func _refresh_rooms() -> void:
 		if e[2]:
 			parts.append("COM SENHA")
 		info.add_child(MenuStyle.label("  •  ".join(parts), 14,
-			MenuStyle.PINK if e[5] else MenuStyle.CYAN, 3))
+			MenuStyle.REC if e[5] else MenuStyle.AMBER, 3))
 		hb.add_child(info)
-		var btn := MenuStyle.NeonButton.new("ENTRAR", 22, false, MenuStyle.YELLOW)
+		var btn := MenuStyle.DvrButton.new("ENTRAR", 22, false, MenuStyle.AMBER)
 		btn.size_flags_vertical = Control.SIZE_SHRINK_CENTER
 		btn.pressed.connect(_on_room_pressed.bind(e))
 		btn.disabled = int(e[3]) >= int(e[4]) and e[5]
@@ -1298,9 +1367,9 @@ func _build_lobby() -> void:
 	var root := Control.new()
 	root.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	root.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	ui.add_child(root)
+	menu_ui.add_child(root)
 	screens["lobby"] = root
-	root.add_child(MenuStyle.Background.new())
+	root.add_child(MenuStyle.CameraWall.new())
 	var center := CenterContainer.new()
 	center.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	center.mouse_filter = Control.MOUSE_FILTER_IGNORE
@@ -1317,13 +1386,13 @@ func _build_lobby() -> void:
 
 	var lb := HBoxContainer.new()
 	lb.add_theme_constant_override("separation", 12)
-	lb.add_child(MenuStyle.label("CONVIDE PELO LINK", 17, MenuStyle.YELLOW))
+	lb.add_child(MenuStyle.label("CONVIDE PELO LINK", 17, MenuStyle.MUTED))
 	link_edit = LineEdit.new()
 	link_edit.editable = false
 	link_edit.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	MenuStyle.style_line_edit(link_edit, 17)
 	lb.add_child(link_edit)
-	copy_btn = MenuStyle.NeonButton.new("COPIAR LINK", 20, false, MenuStyle.CYAN)
+	copy_btn = MenuStyle.DvrButton.new("COPIAR LINK", 20)
 	copy_btn.pressed.connect(_on_copy_pressed)
 	lb.add_child(copy_btn)
 	link_box = lb
@@ -1334,13 +1403,13 @@ func _build_lobby() -> void:
 	vb.add_child(cols)
 
 	# ---- esquerda: jogadores + configuração do líder
-	var lp := MenuStyle.panel(MenuStyle.PINK)
+	var lp := MenuStyle.panel(MenuStyle.AMBER)
 	lp.custom_minimum_size.x = 430
 	cols.add_child(lp)
 	var left := VBoxContainer.new()
 	left.add_theme_constant_override("separation", 8)
 	lp.add_child(left)
-	left.add_child(MenuStyle.label("JOGADORES  (MÁX. %d)" % G.MAX_PLAYERS, 20, MenuStyle.PINK))
+	left.add_child(MenuStyle.label("JOGADORES  (MÁX. %d)" % G.MAX_PLAYERS, 20, MenuStyle.AMBER))
 	lobby_list = VBoxContainer.new()
 	lobby_list.add_theme_constant_override("separation", 6)
 	left.add_child(lobby_list)
@@ -1356,14 +1425,14 @@ func _build_lobby() -> void:
 		var l := MenuStyle.label(text, 18, Color.WHITE, 5)
 		l.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 		row.add_child(l)
-		var bm := MenuStyle.NeonButton.new(" - ", 24, false, MenuStyle.CYAN)
+		var bm := MenuStyle.DvrButton.new(" - ", 24)
 		bm.pressed.connect(minus)
 		row.add_child(bm)
-		var v := MenuStyle.label("", 22, MenuStyle.YELLOW)
+		var v := MenuStyle.label("", 22, MenuStyle.AMBER)
 		v.custom_minimum_size.x = 64
 		v.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 		row.add_child(v)
-		var bp := MenuStyle.NeonButton.new(" + ", 24, false, MenuStyle.CYAN)
+		var bp := MenuStyle.DvrButton.new(" + ", 24)
 		bp.pressed.connect(plus)
 		row.add_child(bp)
 		leader_box.add_child(row)
@@ -1377,17 +1446,17 @@ func _build_lobby() -> void:
 	var rb := HBoxContainer.new()
 	rb.alignment = BoxContainer.ALIGNMENT_CENTER
 	rb.add_theme_constant_override("separation", 40)
-	var add_bot := MenuStyle.NeonButton.new("+ BOT", 24)
+	var add_bot := MenuStyle.DvrButton.new("+ BOT", 24)
 	add_bot.pressed.connect(func(): _to_server(&"rpc_bots", [true]))
 	rb.add_child(add_bot)
-	var del_bot := MenuStyle.NeonButton.new("- BOT", 24)
+	var del_bot := MenuStyle.DvrButton.new("- BOT", 24)
 	del_bot.pressed.connect(func(): _to_server(&"rpc_bots", [false]))
 	rb.add_child(del_bot)
 	leader_box.add_child(rb)
-	start_btn = MenuStyle.NeonButton.new("INICIAR PARTIDA", 28, true)
+	start_btn = MenuStyle.DvrButton.new("INICIAR PARTIDA", 28, true)
 	start_btn.pressed.connect(func(): _to_server(&"rpc_start"))
 	leader_box.add_child(start_btn)
-	var close_btn := MenuStyle.NeonButton.new("ENCERRAR SALA (EXPULSAR TODOS)", 17, false, Color(1, 0.45, 0.4))
+	var close_btn := MenuStyle.DvrButton.new("ENCERRAR SALA (EXPULSAR TODOS)", 17, false, MenuStyle.REC)
 	close_btn.pressed.connect(func(): close_dialog.popup_centered())
 	leader_box.add_child(close_btn)
 	close_dialog = ConfirmationDialog.new()
@@ -1396,22 +1465,23 @@ func _build_lobby() -> void:
 	close_dialog.ok_button_text = "Encerrar"
 	close_dialog.cancel_button_text = "Cancelar"
 	close_dialog.confirmed.connect(func(): _to_server(&"rpc_close_room"))
+	close_dialog.theme = MenuStyle.dialog_theme()
 	ui.add_child(close_dialog)
 	wait_label = MenuStyle.label("", 18, Color(1, 1, 1, 0.85), 5)
 	wait_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	left.add_child(wait_label)
-	var leave := MenuStyle.NeonButton.new("SAIR", 22)
+	var leave := MenuStyle.DvrButton.new("SAIR", 22)
 	leave.pressed.connect(_on_leave_room_pressed)
 	left.add_child(leave)
 
 	# ---- direita: legenda dos itens
-	var rp := MenuStyle.panel(MenuStyle.CYAN)
+	var rp := MenuStyle.panel(MenuStyle.MUTED)
 	rp.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	cols.add_child(rp)
 	var right := VBoxContainer.new()
 	right.add_theme_constant_override("separation", 8)
 	rp.add_child(right)
-	right.add_child(MenuStyle.label("ITENS  (ESCONDIDOS NAS MESAS)", 20, MenuStyle.CYAN))
+	right.add_child(MenuStyle.label("ITENS  (ESCONDIDOS NAS MESAS)", 20, MenuStyle.AMBER))
 	var scroll := ScrollContainer.new()
 	scroll.custom_minimum_size = Vector2(470, 340)
 	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
@@ -1430,14 +1500,13 @@ func _build_lobby() -> void:
 		var txt := VBoxContainer.new()
 		txt.add_theme_constant_override("separation", 0)
 		txt.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-		txt.add_child(MenuStyle.label(String(G.ITEM_NAMES[i]).to_upper(), 16, MenuStyle.YELLOW, 4))
+		txt.add_child(MenuStyle.label(String(G.ITEM_NAMES[i]).to_upper(), 16, MenuStyle.AMBER, 4))
 		var d := MenuStyle.label(G.ITEM_DESCS[i], 14, Color(1, 1, 1, 0.9), 3)
 		d.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 		d.custom_minimum_size.x = 380
 		txt.add_child(d)
 		row.add_child(txt)
 		items_vb.add_child(row)
-	root.add_child(MenuStyle.Scanlines.new())
 
 
 func _build_hud() -> void:
@@ -1522,14 +1591,19 @@ func _build_overlay() -> void:
 
 
 func _show(which: String) -> void:
+	var changed := which != screen
 	screen = which
 	for k in screens:
 		screens[k].visible = (k == which)
 	view.visible = which == "game"
+	cctv.set_screen(which)
+	if changed and which != "boot":
+		cctv.screen_cut()    # troca de tela: a câmera falha por um instante
 	touch.visible = which == "game" and DisplayServer.is_touchscreen_available() and not settings.visible
+	gear_btn.visible = which != "boot"
 	if which == "game":
 		music.fade_out()     # a partida começou: a música some aos poucos
-	else:
+	elif which != "boot":
 		music.play_intro()   # menu / sala de espera: sorteia e toca em loop
 	if which != "game":
 		overlay.visible = false
@@ -1605,9 +1679,9 @@ func _refresh_lobby() -> void:
 		hb.add_child(sw)
 		hb.add_child(MenuStyle.label(String(e[1]).to_upper(), 20))
 		if e[0] == cl_leader:
-			hb.add_child(MenuStyle.label("LÍDER", 15, MenuStyle.YELLOW, 4))
+			hb.add_child(MenuStyle.label("LÍDER", 15, MenuStyle.AMBER, 4))
 		if e[0] == my_id:
-			hb.add_child(MenuStyle.label("VOCÊ", 15, MenuStyle.CYAN, 4))
+			hb.add_child(MenuStyle.label("VOCÊ", 15, MenuStyle.TEXT, 4))
 		lobby_list.add_child(hb)
 	var is_leader := my_id != 0 and my_id == cl_leader
 	leader_box.visible = is_leader

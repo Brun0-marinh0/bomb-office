@@ -5,6 +5,8 @@ extends Node2D
 const G = preload("res://scripts/g.gd")
 const WebAudio = preload("res://scripts/web_audio.gd")
 
+signal boomed   # explosão na tela (a câmera de vigilância falha um instante)
+
 ## Atraso proposital do desenho em relação ao servidor. Com ~3 snapshots de folga,
 ## atrasos irregulares da rede (Wi-Fi, TCP) não viram trancos no movimento.
 const INTERP_DELAY := 0.1
@@ -167,6 +169,7 @@ func _run_event(kind: String, data: Array) -> void:
 		"boom":
 			shake = maxf(shake, 0.12)
 			play_boom()
+			boomed.emit()
 		"placed":
 			actions[data[0]] = ["place_bomb", t]
 		"punch":
