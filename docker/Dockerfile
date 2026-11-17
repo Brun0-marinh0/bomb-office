@@ -31,7 +31,12 @@ RUN godot --headless --path /app --editor --quit \
  && mkdir -p /out \
  && godot --headless --path /app --export-release "Web" /out/index.html \
  && test -f /out/index.wasm \
- && gzip -k -9 /out/index.wasm /out/index.pck /out/index.js
+ && gzip -k -9 /out/index.wasm /out/index.pck /out/index.js \
+ && mkdir -p /out/assets \
+ && cp -r /app/assets/sounds /out/assets/sounds \
+ && find /out/assets/sounds -type f ! -name '*.ogg' ! -name '*.mp3' -delete
+# ^ sons soltos no site: usados pelo scripts/web_audio.gd quando o navegador
+#   não tem AudioWorklet (jogo aberto por http://IP-DA-REDE)
 
 # ------------------------------------------------------------------ servidor do jogo
 FROM godot AS server

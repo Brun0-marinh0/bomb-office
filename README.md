@@ -83,6 +83,11 @@ Comandos úteis: `docker compose logs -f game` (log do servidor), `docker compos
 
 > O preset Web inclui um ajuste (`html/head_include`) que permite rodar via `http://` na rede local.
 > Sem ele, o Godot exige HTTPS fora do `localhost`.
+>
+> **Som em `http://`:** o áudio do Godot na web depende do AudioWorklet, que o navegador só libera em
+> HTTPS/`localhost`. Nesse caso o `scripts/web_audio.gd` toca música e efeitos direto pela Web Audio API,
+> lendo os arquivos soltos de `assets/sounds/` (o Docker copia para o site; o `servidor_web.py` serve da
+> pasta do projeto). Em HTTPS/`localhost` o som continua saindo pelo Godot normalmente.
 
 ## Publicar para a apresentação (um link para a plateia)
 
