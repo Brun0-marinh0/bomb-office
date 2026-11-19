@@ -171,14 +171,16 @@ static func _knob(col: Color) -> ImageTexture:
 	return ImageTexture.create_from_image(img)
 
 
-# =================================================================== botão de engrenagem
-class GearButton extends Button:
+# =================================================================== botões de ícone do canto
+## Base dos botões quadrados do canto da tela (engrenagem, sair): mesmo fundo e borda.
+class HudIconButton extends Button:
 	const SIZE := 56.0
+	var tip := ""
 
 	func _ready() -> void:
 		custom_minimum_size = Vector2(SIZE, SIZE)
 		focus_mode = Control.FOCUS_NONE
-		tooltip_text = "Configurações"
+		tooltip_text = tip
 		for st in ["normal", "hover", "pressed", "focus"]:
 			var sb := StyleBoxFlat.new()
 			sb.bg_color = Color(0, 0, 0, 0.45 if st == "pressed" else 0.3)
@@ -186,6 +188,11 @@ class GearButton extends Button:
 			sb.set_border_width_all(2)
 			sb.set_corner_radius_all(12)
 			add_theme_stylebox_override(st, sb)
+
+
+class GearButton extends HudIconButton:
+	func _init() -> void:
+		tip = "Configurações"
 
 	func _draw() -> void:
 		var c := size * 0.5
@@ -200,3 +207,22 @@ class GearButton extends Button:
 			pts.append(c + Vector2.from_angle(a) * r)
 		draw_colored_polygon(pts, col)
 		draw_circle(c, 5.5, Color(0.1, 0.05, 0.15, 1.0))
+
+
+## Ícone de sair (porta com seta para fora): encerra a partida.
+class ExitButton extends HudIconButton:
+	func _init() -> void:
+		tip = "Encerrar partida"
+
+	func _draw() -> void:
+		var c := size * 0.5
+		var col := Color(1, 1, 1, 0.85)
+		# batente da porta, aberto do lado direito por onde a seta sai
+		var door := PackedVector2Array([
+			c + Vector2(3, -8), c + Vector2(3, -15), c + Vector2(-14, -15),
+			c + Vector2(-14, 15), c + Vector2(3, 15), c + Vector2(3, 8)])
+		draw_polyline(door, col, 3.5, true)
+		# seta saindo
+		draw_line(c + Vector2(-6, 0), c + Vector2(10, 0), col, 3.5, true)
+		draw_colored_polygon(PackedVector2Array([
+			c + Vector2(8, -7), c + Vector2(17, 0), c + Vector2(8, 7)]), col)

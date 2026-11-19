@@ -12,6 +12,7 @@ const PAD_KEY := 68.0       # tamanho de cada seta
 const BOMB_R := 66.0
 const ACTION_R := 48.0
 const MARGIN := 36.0
+const LIFT := 80.0         # quanto os controles sobem em relação à borda de baixo
 
 const FILL := Color(1, 1, 1, 0.16)
 const FILL_ON := Color(1, 1, 1, 0.45)
@@ -42,11 +43,11 @@ func _ready() -> void:
 
 func _pad_center() -> Vector2:
 	var r := PAD_STEP + PAD_KEY * 0.5
-	return Vector2(MARGIN + r, size.y - MARGIN - r)
+	return Vector2(MARGIN + r, size.y - MARGIN - LIFT - r)
 
 
 func _bomb_center() -> Vector2:
-	return Vector2(size.x - MARGIN - BOMB_R, size.y - MARGIN - BOMB_R - 10)
+	return Vector2(size.x - MARGIN - BOMB_R, size.y - MARGIN - LIFT - BOMB_R - 10)
 
 
 func _action_center() -> Vector2:

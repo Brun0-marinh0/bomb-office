@@ -1025,7 +1025,7 @@ func _build_ui() -> void:
 	fs_btn.visible = show_fs
 	ui.add_child(fs_btn)
 	# engrenagem: volume da música e dos efeitos (fica à esquerda do botão de tela cheia)
-	var gs: float = SettingsMenu.GearButton.SIZE
+	var gs: float = SettingsMenu.HudIconButton.SIZE
 	var right := -10.0 - (FullscreenButton.SIZE + 10.0 if show_fs else 0.0)
 	gear_btn = SettingsMenu.GearButton.new()
 	gear_btn.set_anchors_and_offsets_preset(Control.PRESET_TOP_RIGHT)
@@ -1518,7 +1518,7 @@ func _build_hud() -> void:
 	var top := HBoxContainer.new()
 	top.set_anchors_and_offsets_preset(Control.PRESET_TOP_WIDE)
 	top.offset_left = 12
-	top.offset_right = -12 - (SettingsMenu.GearButton.SIZE + 10) - (FullscreenButton.SIZE + 10 if show_fs else 0)
+	top.offset_right = -12 - (SettingsMenu.HudIconButton.SIZE + 10) * 2 - (FullscreenButton.SIZE + 10 if show_fs else 0)
 	top.offset_bottom = 46
 	top.add_theme_constant_override("separation", 16)
 	hud.add_child(top)
@@ -1530,10 +1530,17 @@ func _build_hud() -> void:
 	hud_chips.alignment = BoxContainer.ALIGNMENT_CENTER
 	hud_chips.add_theme_constant_override("separation", 14)
 	top.add_child(hud_chips)
-	hud_abort = _button("Encerrar partida", func(): _to_server(&"rpc_abort"), 14)
-	hud_abort.focus_mode = Control.FOCUS_NONE
-	hud_abort.size_flags_vertical = Control.SIZE_SHRINK_CENTER
-	top.add_child(hud_abort)
+	# encerrar partida (só o líder): ícone de sair à esquerda da engrenagem, no mesmo estilo
+	var gs: float = SettingsMenu.HudIconButton.SIZE
+	var right := -10.0 - (gs + 10.0) - (FullscreenButton.SIZE + 10.0 if show_fs else 0.0)
+	hud_abort = SettingsMenu.ExitButton.new()
+	hud_abort.set_anchors_and_offsets_preset(Control.PRESET_TOP_RIGHT)
+	hud_abort.offset_left = right - gs
+	hud_abort.offset_right = right
+	hud_abort.offset_top = 8
+	hud_abort.offset_bottom = 8 + gs
+	hud_abort.pressed.connect(func(): _to_server(&"rpc_abort"))
+	hud.add_child(hud_abort)
 	hud_stats = _label("", 16)
 	hud_stats.set_anchors_and_offsets_preset(Control.PRESET_BOTTOM_WIDE)
 	hud_stats.offset_top = -34
