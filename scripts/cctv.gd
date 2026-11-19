@@ -18,6 +18,8 @@ var room_name := ""
 var cam := 1
 var t := 0.0
 var _glitch := 0.0
+var _boom_glitch_until := -1.0   # até quando novas explosões são ignoradas
+const BOOM_GLITCH_WINDOW := 0.5
 var _flash := 0.0
 var _cut_t := -1.0              # tempo desde a troca de câmera (-1 = nenhuma em andamento)
 var _mat: ShaderMaterial
@@ -51,9 +53,13 @@ func set_room(n: String) -> void:
 	room_name = n
 
 
-## Explosão: a imagem falha por um instante (explosões em cadeia somam).
-func glitch(amount := 0.35) -> void:
-	_glitch = minf(1.0, _glitch + amount)
+## Explosão: a imagem falha de leve por um instante. Explosões próximas no tempo
+## não somam nem prolongam o efeito: só a primeira da janela dispara o glitch.
+func glitch(amount := 0.15) -> void:
+	if t < _boom_glitch_until:
+		return
+	_boom_glitch_until = t + BOOM_GLITCH_WINDOW
+	_glitch = maxf(_glitch, amount)
 
 
 ## Troca de tela: falha forte com um chuvisco rápido.
