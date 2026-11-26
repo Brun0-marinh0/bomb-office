@@ -29,6 +29,7 @@ const LockButton = preload("res://scripts/lock_button.gd")
 const HudItemList = preload("res://scripts/item_list.gd")
 const WinnerDisplay = preload("res://scripts/winner_display.gd")
 const WINNER_MSG_MAX := 20
+const ROUND_INPUT_GRACE_MS := 800   # bomba/ação ignoradas no começo da rodada (Enter do chat etc.)
 const SETTINGS_PATH := "user://settings.cfg"
 const ABILITY_NAMES := ["Chute", "Luva", "Remoto", "Perfurante", "Linha", "Super Bomba",
 	"Atravessa paredes", "Atravessa bombas"]
@@ -38,6 +39,7 @@ var args := {}
 # ------------------------------------------------------------- estado do servidor
 var rooms := {}            # código -> Room (scripts/room.gd)
 var peer_room := {}        # id do jogador -> código da sala em que está
+var peer_ok := {}          # ids que confirmaram a mesma versão do protocolo (G.PROTOCOL)
 var share_url := ""
 var share_fixed := false
 
@@ -48,6 +50,7 @@ var cl_players: Array = []
 var cl_leader := 0
 var cl_state := "lobby"
 var cl_cfg_wins := 3
+var _round_start_ms := 0    # quando a rodada atual começou (para o respiro de input)
 var cl_blocked_items := 0     # itens bloqueados pelo líder (bits 1 << item)
 var cl_cfg_time := 180
 var cl_roster: Array = []
@@ -103,6 +106,7 @@ var copy_btn: Button
 var close_dialog: ConfirmationDialog
 var wins_value: Label
 var item_rows: Array = []     # [ícone, texto] de cada item da legenda do lobby
+var items_scroll: ScrollContainer
 var item_locks: Array = []    # cadeado de cada item da legenda
 var time_value: Label
 var wait_label: Label
@@ -434,25 +438,55 @@ func _detect_share_url() -> String:
 
 func _on_peer_disconnected(id: int) -> void:
 	if Net.is_server:
+		peer_ok.erase(id)
 		_server_leave(id)
+
+
+## Só entra em sala quem confirmou a mesma versão do protocolo (rpc_list_rooms).
+func _version_ok(id: int) -> bool:
+	if peer_ok.has(id):
+		return true
+	_send_to(id, &"rpc_outdated", [])
+	return false
 
 
 # =================================================================== RPC: cliente -> servidor
 @rpc("any_peer", "reliable")
-func rpc_list_rooms() -> void:
-	if Net.is_server:
-		_push_rooms(_sender())
+func rpc_list_rooms(version: int) -> void:
+	if not Net.is_server:
+		return
+	var id := _sender()
+	if version != G.PROTOCOL:
+		peer_ok.erase(id)
+		print("[servidor] cliente %d com versão %d (servidor %d): recusado" % [id, version, G.PROTOCOL])
+		_send_to(id, &"rpc_outdated", [])
+		return
+	peer_ok[id] = true
+	_push_rooms(id)
+
+
+## Cliente com outra versão do jogo (ex.: aba aberta antes do servidor ser atualizado).
+@rpc("authority", "reliable")
+func rpc_outdated() -> void:
+	if Net.is_dedicated or view == null:
+		return
+	Net.leave()
+	_reset_room_state()
+	_leaving = false
+	my_id = 0
+	_show("menu")
+	status_label.text = "O jogo foi atualizado e esta página está com a versão antiga.\nRecarregue a página (Ctrl+F5) para jogar."
 
 
 @rpc("any_peer", "reliable")
 func rpc_create_room(rname: String, pw: String, pname: String) -> void:
-	if Net.is_server:
+	if Net.is_server and _version_ok(_sender()):
 		_server_create_room(_sender(), rname, pw, pname)
 
 
 @rpc("any_peer", "reliable")
 func rpc_join_room(code: String, pw: String, pname: String) -> void:
-	if Net.is_server:
+	if Net.is_server and _version_ok(_sender()):
 		_server_join_room(_sender(), code, pw, pname)
 
 
@@ -636,6 +670,7 @@ func rpc_round_start(n: int, ids: Array, w: Dictionary) -> void:
 	cl_roster = ids
 	cl_wins = w
 	cl_state = "round"
+	_round_start_ms = Time.get_ticks_msec()
 	cl_map = [PackedByteArray(), PackedByteArray()]
 	view.reset()
 	view.my_id = my_id
@@ -723,6 +758,8 @@ func rpc_round_end(winner: int, w: Dictionary) -> void:
 	if Net.is_dedicated or view == null:
 		return
 	cl_wins = w
+	cl_state = "round_end"
+	dir_stack.clear()
 	view.winner = winner
 	var title := "EMPATE!" if winner == 0 else "%s venceu a rodada!" % _name_of(winner)
 	_show_winner_overlay(winner, title, w)
@@ -775,7 +812,7 @@ func _on_connected() -> void:
 	my_id = multiplayer.get_unique_id()
 	status_label.text = "Conectado!"
 	_rooms_first = true
-	_to_server(&"rpc_list_rooms")
+	_to_server(&"rpc_list_rooms", [G.PROTOCOL])
 	await get_tree().create_timer(5.0).timeout
 	if screen == "menu" and multiplayer.multiplayer_peer is WebSocketMultiplayerPeer:
 		status_label.text = "O servidor não respondeu. Sua versão do jogo pode estar desatualizada:\nrecarregue a página (Ctrl+F5) e tente de novo."
@@ -815,7 +852,7 @@ func _on_host_pressed() -> void:
 	if _start_server(G.DEFAULT_PORT, false, null):
 		my_id = 1
 		_rooms_first = true
-		_to_server(&"rpc_list_rooms")
+		_to_server(&"rpc_list_rooms", [G.PROTOCOL])
 
 
 func _on_dedicated_pressed() -> void:
@@ -920,6 +957,9 @@ func _unhandled_input(event: InputEvent) -> void:
 		return
 	if screen != "game":
 		return
+	# digitando no chat do vencedor: nada do teclado vai para o jogo
+	if get_viewport().gui_get_focus_owner() is LineEdit:
+		return
 	if event is InputEventKey and not event.echo:
 		var k: int = event.physical_keycode
 		var d := _key_dir(k)
@@ -930,16 +970,24 @@ func _unhandled_input(event: InputEvent) -> void:
 			get_viewport().set_input_as_handled()
 		elif event.pressed:
 			if k in [KEY_SPACE, KEY_J, KEY_Z, KEY_ENTER, KEY_KP_0]:
-				_to_server(&"rpc_bomb")
+				if _can_act():
+					_to_server(&"rpc_bomb")
 				get_viewport().set_input_as_handled()
 			elif k in [KEY_SHIFT, KEY_K, KEY_X, KEY_E, KEY_CTRL]:
-				_to_server(&"rpc_action")
+				if _can_act():
+					_to_server(&"rpc_action")
 				get_viewport().set_input_as_handled()
-	elif event is InputEventJoypadButton and event.pressed:
+	elif event is InputEventJoypadButton and event.pressed and _can_act():
 		if event.button_index == JOY_BUTTON_A:
 			_to_server(&"rpc_bomb")
 		elif event.button_index == JOY_BUTTON_B or event.button_index == JOY_BUTTON_X:
 			_to_server(&"rpc_action")
+
+
+## Bomba/ação só valem com a rodada rolando e depois de um respiro no começo dela:
+## uma tecla apertada no fim da rodada anterior (ex.: Enter do chat) não solta bomba no nascimento.
+func _can_act() -> bool:
+	return cl_state == "round" and Time.get_ticks_msec() - _round_start_ms >= ROUND_INPUT_GRACE_MS
 
 
 func _notification(what: int) -> void:
@@ -1417,7 +1465,15 @@ func _build_lobby() -> void:
 	copy_btn = MenuStyle.DvrButton.new("COPIAR LINK", 20)
 	copy_btn.pressed.connect(_on_copy_pressed)
 	lb.add_child(copy_btn)
-	link_box = lb
+	# fundo opaco: o "SEM SINAL" das câmeras do fundo não aparece através do campo/botão
+	var link_panel := PanelContainer.new()
+	var lsb := MenuStyle.box(Color(0.02, 0.03, 0.03, 0.97), Color(MenuStyle.MUTED, 0.5), 1)
+	for side in [SIDE_LEFT, SIDE_RIGHT, SIDE_TOP, SIDE_BOTTOM]:
+		lsb.set_content_margin(side, 8)
+	lsb.content_margin_left = 14
+	link_panel.add_theme_stylebox_override("panel", lsb)
+	link_panel.add_child(lb)
+	link_box = link_panel
 	vb.add_child(link_box)
 
 	var cols := HBoxContainer.new()
@@ -1505,6 +1561,7 @@ func _build_lobby() -> void:
 	rp.add_child(right)
 	right.add_child(MenuStyle.label("ITENS  (ESCONDIDOS NAS MESAS)", 20, MenuStyle.AMBER))
 	var scroll := ScrollContainer.new()
+	items_scroll = scroll
 	scroll.custom_minimum_size = Vector2(470, 340)
 	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
 	MenuStyle.style_scroll(scroll)
@@ -1520,6 +1577,7 @@ func _build_lobby() -> void:
 		row.add_theme_constant_override("separation", 12)
 		var icon := ItemIcon.new()
 		icon.item = i
+		icon.mouse_filter = Control.MOUSE_FILTER_PASS   # deixa a roda do mouse chegar na rolagem
 		row.add_child(icon)
 		item_rows.append(icon)
 		var txt := VBoxContainer.new()
@@ -1534,6 +1592,7 @@ func _build_lobby() -> void:
 		item_rows.append(txt)
 		# cadeado: o líder bloqueia/libera o item para as partidas desta sala
 		var lock := LockButton.new()
+		lock.mouse_filter = Control.MOUSE_FILTER_PASS
 		var it := i
 		lock.pressed.connect(func(): _to_server(&"rpc_toggle_item", [it]))
 		row.add_child(lock)
@@ -1654,6 +1713,8 @@ func _show(which: String) -> void:
 		music.fade_out()     # a partida começou: a música some aos poucos
 	elif which != "boot":
 		music.play_intro()   # menu / sala de espera: sorteia e toca em loop
+	if which == "lobby" and changed:
+		items_scroll.set_deferred("scroll_vertical", 0)   # legenda de itens sempre começa do topo
 	if which != "game":
 		overlay.visible = false
 		dir_stack.clear()

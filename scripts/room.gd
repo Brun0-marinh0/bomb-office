@@ -8,6 +8,7 @@ const ServerGame = preload("res://scripts/server_game.gd")
 const Codec = preload("res://scripts/snapshot_codec.gd")
 const WINNER_MSG_MAX := 20
 const MAP_RESEND := 30     # manda o mapa inteiro pelo menos a cada 30 snapshots (1 s), para quem entrou no meio
+const ROUND_GRACE_MS := 400.0  # bomba/ação de humanos ignoradas logo após a rodada começar
 
 signal changed            # algo que aparece na lista de salas mudou (jogadores, estado)
 signal emptied            # nenhum humano na sala: o Main exclui a sala
@@ -34,6 +35,7 @@ var sim_speed := 1
 var last_winner := 0       # vencedor da última rodada (pode mandar mensagem no modal)
 var closed := false
 var server_ms := 0.0       # relógio da sala (os clientes interpolam por ele); nunca zera
+var _round_at_ms := 0.0
 var _last_map := PackedByteArray()
 var _map_age := 0
 var _jitter_at := {}       # teste --fake-jitter: id -> instante liberado do último envio
@@ -268,13 +270,19 @@ func input(sender: int, d: Vector2i) -> void:
 
 
 func bomb(sender: int) -> void:
-	if state == "round":
+	if state == "round" and _round_ready():
 		sim.request_bomb(sender)
 
 
 func action(sender: int) -> void:
-	if state == "round":
+	if state == "round" and _round_ready():
 		sim.request_action(sender)
+
+
+## Respiro no começo da rodada: comando que chegou atrasado da rodada anterior
+## (ex.: Enter do chat do vencedor) não solta bomba em cima de quem acabou de nascer.
+func _round_ready() -> bool:
+	return server_ms - _round_at_ms >= ROUND_GRACE_MS
 
 
 # =================================================================== partida
@@ -301,6 +309,7 @@ func _start_round() -> void:
 	sim.blocked_items = blocked_items
 	sim.start_round(entries, float(cfg_time))
 	state = "round"
+	_round_at_ms = server_ms
 	_snap_tick = 0
 	_last_map = PackedByteArray()   # primeiro snapshot da rodada leva o mapa
 	push_lobby()
