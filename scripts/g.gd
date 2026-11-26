@@ -54,8 +54,8 @@ const ITEM_DESCS := ["",
 	"Explosão atravessa blocos destrutíveis",
 	"Aperte BOMBA em cima de uma bomba: solta todas em linha",
 	"Sua primeira bomba tem alcance máximo",
-	"Atravessa blocos destrutíveis",
-	"Passa por cima de bombas",
+	"Atravessa blocos destrutíveis por 10 segundos",
+	"Passa por cima de bombas por 15 segundos",
 	"Invencível por 10 segundos",
 	"Aguenta uma explosão",
 	"Doença aleatória! Passa para quem encostar em você"]
@@ -65,7 +65,7 @@ const ITEM_COLORS := [Color(0, 0, 0, 0),
 	Color(0.90, 0.80, 0.20), Color(0.85, 0.10, 0.45), Color(0.45, 0.35, 0.25), Color(0.45, 0.45, 0.55),
 	Color(0.20, 0.75, 0.45), Color(1.00, 0.40, 0.55), Color(0.10, 0.10, 0.10)]
 # chance relativa de cada item aparecer embaixo de um bloco
-const ITEM_WEIGHTS := [0, 14, 14, 2, 10, 5, 4, 3, 3, 3, 3, 2, 3, 2, 3, 5]
+const ITEM_WEIGHTS := [0, 14, 14, 2, 10, 5, 4, 3, 3, 3, 3, 1, 1, 2, 3, 5]
 
 # ---------------------------------------------------------------- doenças (caveira)
 const D_NONE := 0
@@ -100,6 +100,8 @@ const PUNCH_DIST := 3
 const PUNCH_TIME_PER_TILE := 0.12
 const DISEASE_TIME := 15.0
 const VEST_TIME := 10.0
+const WALL_PASS_TIME := 10.0    # atravessa paredes dura pouco: é o item mais forte
+const BOMB_PASS_TIME := 15.0
 const HEART_INVULN := 2.0
 const SOFT_DENSITY := 0.72      # chance de um tile livre ter bloco destrutível
 const ITEM_CHANCE := 0.40       # chance de um bloco esconder um item
