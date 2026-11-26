@@ -343,7 +343,14 @@ func _draw() -> void:
 		var z: float = e[3]
 		var kind: int = e[4]
 		var frac: float = e[5]
-		var pulse := 1.0 + 0.07 * sin(t * (8.0 + 22.0 * (1.0 - frac)))
+		# pavio: a bomba pulsa cada vez mais rápido e mais forte (3 Hz -> 14 Hz) e fica
+		# vermelha no final (ajuda a medir a fuga)
+		var is_remote_bomb := (kind & 1) != 0
+		var lit := clampf(1.0 - frac, 0.0, 1.0)
+		var el := lit * G.FUSE
+		var phase := TAU * (3.0 * el + 0.5 * (14.0 - 3.0) / G.FUSE * el * el)
+		var amp := 0.04 if is_remote_bomb else lerpf(0.05, 0.16, lit)
+		var pulse := 1.0 + amp * sin(phase if not is_remote_bomb else t * 6.0)
 		var sz := T * pulse
 		var c := pos * T - Vector2(0, z * T)
 		if z > 0.01:
@@ -365,6 +372,8 @@ func _draw() -> void:
 		elif not bomb_anim.is_empty():
 			# pavio aceso; cada bomba começa num quadro diferente
 			bt = bomb_anim[int(t * BOMB_FPS + id) % bomb_anim.size()]
+		if not is_remote_bomb and frac < 0.4:
+			tint = tint.lerp(Color(1.0, 0.25, 0.2), (0.5 + 0.5 * sin(phase)) * 0.6)
 		draw_texture_rect(bt, Rect2(c - Vector2(sz, sz) * 0.5, Vector2(sz, sz)), false, tint)
 		if not bomb_custom and not remote:
 			if (kind & 1) != 0:

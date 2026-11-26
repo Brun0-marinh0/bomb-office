@@ -11,7 +11,7 @@ const DEFAULT_PORT := 9080
 # versão do protocolo de rede: AUMENTE sempre que mudar RPCs ou o formato do snapshot.
 # Cliente com versão diferente do servidor (aba aberta antes de atualizar) é recusado,
 # em vez de entrar na sala e decodificar o snapshot errado.
-const PROTOCOL := 2
+const PROTOCOL := 3
 
 # ---------------------------------------------------------------- tiles
 const T_EMPTY := 0
@@ -111,7 +111,7 @@ const SOFT_DENSITY := 0.72      # chance de um tile livre ter bloco destrutível
 const ITEM_CHANCE := 0.40       # chance de um bloco esconder um item
 const SUDDEN_DEATH_AT := 60.0   # segundos restantes quando começa a morte súbita
 const SUDDEN_STEP := 0.3        # intervalo entre blocos caindo
-const CORNER_ASSIST := 0.12     # quanto desalinhado ainda "escorrega" para o corredor
+const CORNER_ASSIST := 0.02     # quanto desalinhado ainda "escorrega" para o corredor
 const ROUND_END_DELAY := 2.0    # espera para detectar mortes simultâneas (empate)
 const COUNTDOWN := 3.0          # 3-2-1 no começo de cada rodada (ninguém se move)
 

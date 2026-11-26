@@ -131,7 +131,7 @@ func add_bot() -> void:
 		return
 	_bot_seq += 1
 	var id := -_bot_seq
-	lobby[id] = {"id": id, "name": _unique_name("Bot"), "color": _free_color(), "bot": true}
+	lobby[id] = {"id": id, "name": _unique_name("Bot"), "color": _free_color(), "bot": true, "difficulty": 1}
 	order.append(id)
 	wins[id] = 0
 
@@ -196,7 +196,7 @@ func push_lobby() -> void:
 	var list: Array = []
 	for id in order:
 		var e: Dictionary = lobby[id]
-		list.append([id, e.name, e.color, e.bot])
+		list.append([id, e.name, e.color, e.bot, int(e.get("difficulty", 1))])
 	send_all(&"rpc_lobby", [list, leader(), state, cfg_wins, cfg_time,
 		main.share_url, main.share_fixed, room_name, code, blocked_items])
 
@@ -232,6 +232,14 @@ func toggle_item(sender: int, item: int) -> void:
 	if sender != leader() or state != "lobby" or item <= G.I_NONE or item >= G.ITEM_COUNT:
 		return
 	blocked_items ^= 1 << item
+	push_lobby()
+
+
+## Líder troca a dificuldade de um bot: Fácil -> Normal -> Difícil -> Fácil.
+func bot_difficulty(sender: int, bot_id: int) -> void:
+	if sender != leader() or state != "lobby" or not lobby.has(bot_id) or not lobby[bot_id].bot:
+		return
+	lobby[bot_id].difficulty = (int(lobby[bot_id].get("difficulty", 1)) + 1) % 3
 	push_lobby()
 
 
@@ -272,9 +280,9 @@ func winner_msg(sender: int, text: String) -> void:
 		send_all(&"rpc_winner_text", [sender, clean])
 
 
-func input(sender: int, d: Vector2i) -> void:
+func input(sender: int, d: Vector2i, d2 := Vector2i.ZERO) -> void:
 	if state == "round":
-		sim.set_input(sender, d)
+		sim.set_input(sender, d, d2)
 
 
 func bomb(sender: int) -> void:
@@ -321,7 +329,8 @@ func _start_round() -> void:
 	round_no += 1
 	var entries: Array = []
 	for id in roster:
-		entries.append({"id": id, "name": lobby[id].name, "bot": lobby[id].bot})
+		entries.append({"id": id, "name": lobby[id].name, "bot": lobby[id].bot,
+			"difficulty": int(lobby[id].get("difficulty", 1))})
 	entries.shuffle()
 	sim.blocked_items = blocked_items
 	sim.start_round(entries, float(cfg_time))
