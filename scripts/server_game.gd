@@ -10,6 +10,7 @@ signal game_event(kind: String, data: Array)
 
 var tiles := PackedByteArray()
 var items := PackedByteArray()
+var blocked_items := 0      # bits (1 << item) dos itens bloqueados pelo líder da sala
 var flames := PackedFloat32Array()
 var burn := PackedFloat32Array()
 var bombs: Array = []
@@ -83,8 +84,9 @@ func _build_map(spawns: Array) -> void:
 		for d in G.DIRS:
 			safe[s + d] = true
 	var total := 0
-	for w in G.ITEM_WEIGHTS:
-		total += w
+	for i in range(1, G.ITEM_COUNT):
+		if not _is_blocked(i):
+			total += G.ITEM_WEIGHTS[i]
 	for y in G.H:
 		for x in G.W:
 			var c := Vector2i(x, y)
@@ -93,17 +95,23 @@ func _build_map(spawns: Array) -> void:
 				tiles[k] = G.T_HARD
 			elif not safe.has(c) and rng.randf() < G.SOFT_DENSITY:
 				tiles[k] = G.T_SOFT
-				if rng.randf() < G.ITEM_CHANCE:
+				if total > 0 and rng.randf() < G.ITEM_CHANCE:
 					items[k] = _random_item(total)
 
 
 func _random_item(total: int) -> int:
 	var r := rng.randi_range(1, total)
 	for i in range(1, G.ITEM_COUNT):
+		if _is_blocked(i):
+			continue
 		r -= G.ITEM_WEIGHTS[i]
 		if r <= 0:
 			return i
-	return G.I_BOMB_UP
+	return G.I_NONE
+
+
+func _is_blocked(item: int) -> bool:
+	return (blocked_items & (1 << item)) != 0
 
 
 # ====================================================================== comandos dos jogadores
