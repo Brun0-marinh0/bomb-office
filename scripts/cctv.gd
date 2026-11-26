@@ -23,6 +23,9 @@ const BOOM_GLITCH_WINDOW := 0.5
 var _flash := 0.0
 var _cut_t := -1.0              # tempo desde a troca de câmera (-1 = nenhuma em andamento)
 var _mat: ShaderMaterial
+var intensity := 1.0            # configurações: 0 = imagem limpa, 1 = efeito completo
+var interference := true        # configurações: glitch das explosões e chuvisco das trocas
+const BASE := {"aberration": 1.6, "grain": 0.05, "vignette": 0.45, "line_dark": 0.13, "vhs_bar": 0.035}
 var _osd: Control
 
 
@@ -40,11 +43,22 @@ func _ready() -> void:
 	set_screen(screen)
 
 
+## Intensidade do efeito (configurações > vídeo) e interferências ligadas/desligadas.
+func set_intensity(v: float, interf: bool) -> void:
+	intensity = clampf(v, 0.0, 1.0)
+	interference = interf
+	if _mat == null:
+		return
+	for k in BASE:
+		_mat.set_shader_parameter(k, float(BASE[k]) * intensity)
+	set_screen(screen)
+
+
 ## Tela atual (boot, menu, rooms, lobby, game): muda o texto da câmera e a lente.
 func set_screen(s: String) -> void:
 	screen = s
 	if _mat != null:
-		_mat.set_shader_parameter("barrel", BARREL_GAME if s == "game" else BARREL_MENU)
+		_mat.set_shader_parameter("barrel", (BARREL_GAME if s == "game" else BARREL_MENU) * intensity)
 	if s != "game":
 		_cut_t = -1.0
 
@@ -93,8 +107,9 @@ func _process(dt: float) -> void:
 		if _cut_t > NO_SIGNAL + SNOW_FADE + 0.6:
 			_cut_t = -1.0
 	snow = maxf(snow, 0.7 * _flash / FLASH)
-	_mat.set_shader_parameter("glitch", _glitch)
-	_mat.set_shader_parameter("snow", snow)
+	var k := 1.0 if interference else 0.0
+	_mat.set_shader_parameter("glitch", _glitch * k)
+	_mat.set_shader_parameter("snow", snow * k)
 	_osd.queue_redraw()
 
 

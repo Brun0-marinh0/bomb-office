@@ -35,7 +35,11 @@ var sim_speed := 1
 var last_winner := 0       # vencedor da última rodada (pode mandar mensagem no modal)
 var closed := false
 var server_ms := 0.0       # relógio da sala (os clientes interpolam por ele); nunca zera
-var _round_at_ms := 0.0
+var _round_at_ms := 0.0     # quando a rodada libera (fim da contagem 3-2-1)
+var stats := {}             # id -> {kills, deaths, suicides, items} somados na partida
+var rematch_votes := {}     # ids que votaram em revanche na tela de resultado
+var _match_no := 0          # invalida o timer da tela de resultado se começar outra partida
+const RESULTS_TIME := 30.0  # segundos na tela de resultado antes de voltar ao lobby
 var _last_map := PackedByteArray()
 var _map_age := 0
 var _jitter_at := {}       # teste --fake-jitter: id -> instante liberado do último envio
@@ -106,6 +110,7 @@ func remove_member(id: int) -> void:
 	wins.erase(id)
 	if state == "round":
 		sim.remove_player(id)
+	rematch_votes.erase(id)
 	if not test_mode and _humans(order) == 0:
 		emptied.emit()
 		return
@@ -115,6 +120,9 @@ func remove_member(id: int) -> void:
 		_back_to_lobby()
 	else:
 		push_lobby()
+		if state == "match_end":
+			_push_votes()
+			_check_rematch()   # quem saiu era o único que faltava votar
 	changed.emit()
 
 
@@ -279,10 +287,14 @@ func action(sender: int) -> void:
 		sim.request_action(sender)
 
 
-## Respiro no começo da rodada: comando que chegou atrasado da rodada anterior
+## Rodada liberada: acabou a contagem 3-2-1 (+ respiro). Comando que chegou antes disso
 ## (ex.: Enter do chat do vencedor) não solta bomba em cima de quem acabou de nascer.
 func _round_ready() -> bool:
 	return server_ms - _round_at_ms >= ROUND_GRACE_MS
+
+
+func _counting_down() -> bool:
+	return server_ms < _round_at_ms
 
 
 # =================================================================== partida
@@ -291,6 +303,11 @@ func start_match() -> void:
 	for id in roster:
 		wins[id] = 0
 	round_no = 0
+	_match_no += 1
+	stats.clear()
+	rematch_votes.clear()
+	for id in roster:
+		stats[id] = {"kills": 0, "deaths": 0, "suicides": 0, "items": 0}
 	log_line("partida iniciada com %d jogadores (vence quem fizer %d)" % [roster.size(), cfg_wins])
 	_start_round()
 	changed.emit()
@@ -309,20 +326,22 @@ func _start_round() -> void:
 	sim.blocked_items = blocked_items
 	sim.start_round(entries, float(cfg_time))
 	state = "round"
-	_round_at_ms = server_ms
+	# contagem 3-2-1: o mapa aparece, mas a simulação só anda depois dela
+	_round_at_ms = server_ms + G.COUNTDOWN * 1000.0 / sim_speed
 	_snap_tick = 0
 	_last_map = PackedByteArray()   # primeiro snapshot da rodada leva o mapa
 	push_lobby()
-	send_all(&"rpc_round_start", [round_no, roster.duplicate(), _wins_for(roster)])
+	send_all(&"rpc_round_start", [round_no, roster.duplicate(), _wins_for(roster), G.COUNTDOWN])
 
 
 func _physics_process(delta: float) -> void:
 	server_ms += delta * 1000.0
 	if state != "round" or closed:
 		return
-	for i in sim_speed:
-		if sim.running:
-			sim.tick(delta)
+	if not _counting_down():
+		for i in sim_speed:
+			if sim.running:
+				sim.tick(delta)
 	_snap_tick += 1
 	if state == "round" and _snap_tick % 2 == 0:
 		_send_snapshot(false)
@@ -368,6 +387,7 @@ func _on_round_over(winner: int) -> void:
 	if winner != 0:
 		wins[winner] = int(wins.get(winner, 0)) + 1
 	state = "round_end"
+	_add_round_stats()
 	var wname: String = lobby[winner].name if lobby.has(winner) else "?"
 	log_line("rodada %d: %s" % [round_no, ("vitória de " + wname) if winner != 0 else "empate"])
 	var w := _wins_for(roster)
@@ -377,9 +397,9 @@ func _on_round_over(winner: int) -> void:
 	var champion := winner != 0 and int(wins[winner]) >= cfg_wins
 	# vencedor humano ganha mais tempo para escrever a mensagem
 	var human_winner: bool = lobby.has(winner) and not lobby[winner].bot
-	var wait := 4.0
+	var wait := 5.0     # dá tempo de ler o placar (e a próxima rodada ainda tem 3-2-1)
 	if champion:
-		wait = 3.0
+		wait = 4.0
 	elif human_winner:
 		wait = 9.0
 	await get_tree().create_timer(wait / sim_speed).timeout
@@ -394,10 +414,76 @@ func _on_round_over(winner: int) -> void:
 		_start_round()
 		return
 	state = "match_end"
+	rematch_votes.clear()
 	log_line("CAMPEÃO: %s" % wname)
-	send_all(&"rpc_match_end", [winner, w])
-	await get_tree().create_timer(12.0 if human_winner else 7.0).timeout
-	if state == "match_end" and not closed and is_inside_tree():
+	send_all(&"rpc_match_end", [winner, w, _stats_list(), RESULTS_TIME])
+	_push_votes()
+	var mn := _match_no
+	await get_tree().create_timer(RESULTS_TIME).timeout
+	if state == "match_end" and mn == _match_no and not closed and is_inside_tree():
+		_back_to_lobby()
+
+
+func _add_round_stats() -> void:
+	for p in sim.players.values():
+		if not stats.has(p.id):
+			continue
+		var s: Dictionary = stats[p.id]
+		s.kills += int(p.kills)
+		s.items += int(p.picked)
+		if not p.alive:
+			s.deaths += 1
+			if p.suicide:
+				s.suicides += 1
+
+
+## [[id, vitórias, abates, mortes, suicídios, itens], ...] na ordem do placar.
+func _stats_list() -> Array:
+	var out: Array = []
+	for id in roster:
+		var s: Dictionary = stats.get(id, {"kills": 0, "deaths": 0, "suicides": 0, "items": 0})
+		out.append([id, int(wins.get(id, 0)), s.kills, s.deaths, s.suicides, s.items])
+	out.sort_custom(func(a, b): return a[1] > b[1] if a[1] != b[1] else a[2] > b[2])
+	return out
+
+
+# =================================================================== tela de resultado
+## Revanche por votação: quando todos os humanos da sala votarem, começa outra partida.
+func vote_rematch(sender: int) -> void:
+	if state != "match_end" or not lobby.has(sender) or lobby[sender].bot:
+		return
+	if rematch_votes.has(sender):
+		rematch_votes.erase(sender)   # clicou de novo: retira o voto
+	else:
+		rematch_votes[sender] = true
+	_push_votes()
+	_check_rematch()
+
+
+func _check_rematch() -> void:
+	if state != "match_end":
+		return
+	var humans := _humans_ids()
+	if humans.is_empty():
+		return
+	for id in humans:
+		if not rematch_votes.has(id):
+			return
+	log_line("revanche aceita por todos")
+	start_match()
+
+
+func _push_votes() -> void:
+	var ids: Array = []
+	for id in rematch_votes:
+		if lobby.has(id):
+			ids.append(id)
+	send_all(&"rpc_rematch_votes", [ids, _humans_ids().size()])
+
+
+## Líder encerra a tela de resultado e volta todo mundo para o lobby.
+func results_to_lobby(sender: int) -> void:
+	if state == "match_end" and sender == leader():
 		_back_to_lobby()
 
 

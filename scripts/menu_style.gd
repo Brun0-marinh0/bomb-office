@@ -343,7 +343,7 @@ class CameraWall extends Control:
 					var tex: Texture2D = frames[int(t * 12.0) % frames.size()]
 					var dst := Rect2(r.position + Vector2(_walker.x * tile, 3 * tile), Vector2(tile, tile))
 					if r.encloses(dst):
-						draw_texture_rect(tex, dst, false, G.PLAYER_COLORS[_walker.color % G.PLAYER_COLORS.size()])
+						draw_texture_rect(tex, dst, false, G.player_color(_walker.color))
 			draw_rect(r, DIM)
 			if cam == _lost:
 				draw_rect(r, Color(0.03, 0.06, 0.2))
