@@ -1854,7 +1854,11 @@ func _update_hud(s: Array) -> void:
 	var bits: int = mine[6]
 	for i in ABILITY_NAMES.size():
 		if (bits & (1 << i)) != 0:
-			list.append({key = "ab%d" % i, text = ABILITY_NAMES[i]})
+			if i == 6 or i == 7:   # atravessa paredes / bombas: têm tempo
+				var tl := float(mine[13 if i == 6 else 14])
+				list.append({key = "ab%d" % i, text = "%s %ds" % [ABILITY_NAMES[i], ceili(tl)], timer = tl})
+			else:
+				list.append({key = "ab%d" % i, text = ABILITY_NAMES[i]})
 	if (bits & 256) != 0:
 		list.append({key = "vest", text = "Colete %ds" % ceili(mine[12]), timer = float(mine[12])})
 	if (bits & 1024) != 0:

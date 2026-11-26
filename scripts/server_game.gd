@@ -70,7 +70,7 @@ func _new_player(r: Dictionary, spawn: Vector2i) -> Dictionary:
 		"facing": Vector2i(0, 1), "dir": Vector2i.ZERO,
 		"bombs_max": G.START_BOMBS, "fire": G.START_FIRE, "speed_lvl": 0,
 		"kick": false, "punch": false, "remote": false, "pierce": false, "line": false,
-		"power": false, "wall_pass": false, "bomb_pass": false,
+		"power": false, "wall_pass": false, "bomb_pass": false, "wall_t": 0.0, "bomb_pass_t": 0.0,
 		"vest_t": 0.0, "hearts": 0, "invuln_t": 0.0,
 		"disease": G.D_NONE, "disease_t": 0.0,
 		"collected": [], "ai_path": [], "ai_timer": 0.0, "moving": false,
@@ -166,12 +166,39 @@ func _update_status(p: Dictionary, dt: float) -> void:
 		p.vest_t = maxf(0.0, p.vest_t - dt)
 	if p.invuln_t > 0.0:
 		p.invuln_t = maxf(0.0, p.invuln_t - dt)
+	if p.wall_pass:
+		p.wall_t = maxf(0.0, p.wall_t - dt)
+		# acabou o tempo: só desliga fora dos blocos, para não prender o jogador na parede
+		if p.wall_t <= 0.0 and not _inside_block(p):
+			p.wall_pass = false
+	if p.bomb_pass:
+		p.bomb_pass_t = maxf(0.0, p.bomb_pass_t - dt)
+		if p.bomb_pass_t <= 0.0:
+			p.bomb_pass = false
+			# se estiver em cima de bomba, consegue sair dela (como quando solta a própria bomba)
+			for b in bombs:
+				if not b.fly and _overlaps(p.pos, b.pos) and not b.pass_ids.has(p.id):
+					b.pass_ids.append(p.id)
 	if p.disease != G.D_NONE:
 		p.disease_t -= dt
 		if p.disease_t <= 0.0:
 			p.disease = G.D_NONE
 		elif p.disease == G.D_DIARRHEA:
 			_try_place_bomb(p, false)
+
+
+## Jogador encostando em algum bloco destrutível (pode estar entre duas células).
+func _inside_block(p: Dictionary) -> bool:
+	var c: Vector2i = G.cell_of(p.pos)
+	for dy in range(-1, 2):
+		for dx in range(-1, 2):
+			var n: Vector2i = c + Vector2i(dx, dy)
+			if not G.in_bounds(n):
+				continue
+			var t: int = tiles[G.idx(n)]
+			if (t == G.T_SOFT or t == G.T_BURNING) and _overlaps(p.pos, G.center_of(n)):
+				return true
+	return false
 
 
 # ====================================================================== movimento
@@ -600,8 +627,10 @@ func _apply_item(p: Dictionary, it: int) -> void:
 			p.power = true
 		G.I_WALL_PASS:
 			p.wall_pass = true
+			p.wall_t = G.WALL_PASS_TIME
 		G.I_BOMB_PASS:
 			p.bomb_pass = true
+			p.bomb_pass_t = G.BOMB_PASS_TIME
 		G.I_VEST:
 			p.vest_t = G.VEST_TIME
 		G.I_HEART:
@@ -692,7 +721,7 @@ func snapshot() -> Array:
 	var pl: Array = []
 	for p in players.values():
 		pl.append([p.id, p.pos.x, p.pos.y, p.alive, p.facing.x, p.facing.y, _bits(p), p.disease,
-			p.bombs_max, p.fire, p.speed_lvl, p.disease_t, p.vest_t])
+			p.bombs_max, p.fire, p.speed_lvl, p.disease_t, p.vest_t, p.wall_t, p.bomb_pass_t])
 	var bl: Array = []
 	for b in bombs:
 		var z := 0.0
