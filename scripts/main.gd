@@ -25,6 +25,7 @@ const FullscreenButton = preload("res://scripts/fullscreen_button.gd")
 const Music = preload("res://scripts/music.gd")
 const SettingsMenu = preload("res://scripts/settings_menu.gd")
 const ItemIcon = preload("res://scripts/item_icon.gd")
+const HudItemList = preload("res://scripts/item_list.gd")
 const WinnerDisplay = preload("res://scripts/winner_display.gd")
 const WINNER_MSG_MAX := 20
 const SETTINGS_PATH := "user://settings.cfg"
@@ -105,6 +106,8 @@ var start_btn: Button
 var hud_time: Label
 var hud_chips: HBoxContainer
 var hud_stats: Label
+var hud_items: HudItemList
+var hud_items_layer: CanvasLayer
 var hud_ping: Label
 var hud_abort: Button
 var overlay: CenterContainer
@@ -944,6 +947,13 @@ func _process(_dt: float) -> void:
 		s = floorf(s * 4.0) / 4.0
 	view.scale = Vector2(s, s)
 	view.position = Vector2((vs.x - map.x * s) * 0.5, top + (vs.y - top - bottom - map.y * s) * 0.5).round()
+	# painel "SEUS ITENS" encostado no lado direito da arena, alinhado com o topo dela.
+	# Em tela estreita (sem sobra) fica por cima da arena, encostado na borda da tela.
+	var panel_w := clampf(vs.x - (view.position.x + map.x * s) - 10.0, 170.0, 280.0)
+	var x0 := minf(view.position.x + map.x * s + 6.0, vs.x - panel_w - 10.0)
+	hud_items.offset_left = x0
+	hud_items.offset_right = x0 + panel_w
+	hud_items.offset_top = view.position.y
 
 
 # =================================================================== UI
@@ -1547,6 +1557,15 @@ func _build_hud() -> void:
 	hud_stats.offset_left = 12
 	hud_stats.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	hud.add_child(hud_stats)
+	hud_items = HudItemList.new()
+	hud_items.set_anchors_preset(Control.PRESET_TOP_LEFT)
+	hud_items.visible = false
+	# fica abaixo do filtro de câmera (camada 2), para entrar no olho-de-peixe junto com a arena
+	hud_items_layer = CanvasLayer.new()
+	hud_items_layer.layer = 1
+	hud_items_layer.visible = false
+	add_child(hud_items_layer)
+	hud_items_layer.add_child(hud_items)
 	hud_ping = _label("", 13)
 	hud_ping.set_anchors_and_offsets_preset(Control.PRESET_BOTTOM_RIGHT)
 	hud_ping.offset_left = -110
@@ -1603,6 +1622,7 @@ func _show(which: String) -> void:
 	for k in screens:
 		screens[k].visible = (k == which)
 	view.visible = which == "game"
+	hud_items_layer.visible = which == "game"
 	cctv.set_screen(which)
 	if changed and which != "boot":
 		cctv.screen_cut()    # troca de tela: a câmera falha por um instante
@@ -1780,25 +1800,37 @@ func _update_hud(s: Array) -> void:
 	hud_abort.visible = my_id == cl_leader
 	if mine == null:
 		hud_stats.text = "Assistindo — você entra na próxima partida."
+		hud_items.visible = false
+		hud_items.clear_now()
 		return
+	hud_items.visible = true
 	if not mine[3]:
 		hud_stats.text = "Você foi eliminado — assistindo..."
+		hud_items.set_entries([])
 		return
-	var parts := PackedStringArray()
-	parts.append("Bombas: %d" % mine[8])
-	parts.append("Fogo: %d" % mine[9])
-	parts.append("Velocidade: %d" % (int(mine[10]) + 1))
+	hud_stats.text = ""
+	# lista de itens coletados (cada linha aparece/some com animação no painel)
+	var list: Array = []
+	if int(mine[8]) > G.START_BOMBS:
+		list.append({key = "bombs", text = "Bombas +%d" % (int(mine[8]) - G.START_BOMBS)})
+	if int(mine[9]) >= G.MAX_FIRE:
+		list.append({key = "fire", text = "Fogo máximo"})
+	elif int(mine[9]) > G.START_FIRE:
+		list.append({key = "fire", text = "Fogo +%d" % (int(mine[9]) - G.START_FIRE)})
+	if int(mine[10]) > 0:
+		list.append({key = "speed", text = "Patins +%d" % int(mine[10])})
 	var bits: int = mine[6]
 	for i in ABILITY_NAMES.size():
 		if (bits & (1 << i)) != 0:
-			parts.append(ABILITY_NAMES[i])
+			list.append({key = "ab%d" % i, text = ABILITY_NAMES[i]})
 	if (bits & 256) != 0:
-		parts.append("Colete %ds" % ceili(mine[12]))
+		list.append({key = "vest", text = "Colete %ds" % ceili(mine[12]), timer = float(mine[12])})
 	if (bits & 1024) != 0:
-		parts.append("Coração")
+		list.append({key = "heart", text = "Coração"})
 	if int(mine[7]) != 0:
-		parts.append("Caveira: %s %ds" % [G.DISEASE_NAMES[mine[7]], ceili(mine[11])])
-	hud_stats.text = "  •  ".join(parts)
+		list.append({key = "skull%d" % int(mine[7]),
+			text = "Caveira: %s %ds" % [G.DISEASE_NAMES[mine[7]], ceili(mine[11])], timer = float(mine[11])})
+	hud_items.set_entries(list)
 
 
 func _name_of(id: int) -> String:
