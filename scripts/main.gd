@@ -25,6 +25,7 @@ const FullscreenButton = preload("res://scripts/fullscreen_button.gd")
 const Music = preload("res://scripts/music.gd")
 const SettingsMenu = preload("res://scripts/settings_menu.gd")
 const ItemIcon = preload("res://scripts/item_icon.gd")
+const LockButton = preload("res://scripts/lock_button.gd")
 const HudItemList = preload("res://scripts/item_list.gd")
 const WinnerDisplay = preload("res://scripts/winner_display.gd")
 const WINNER_MSG_MAX := 20
@@ -47,6 +48,7 @@ var cl_players: Array = []
 var cl_leader := 0
 var cl_state := "lobby"
 var cl_cfg_wins := 3
+var cl_blocked_items := 0     # itens bloqueados pelo líder (bits 1 << item)
 var cl_cfg_time := 180
 var cl_roster: Array = []
 var cl_wins := {}
@@ -100,6 +102,8 @@ var leader_box: VBoxContainer
 var copy_btn: Button
 var close_dialog: ConfirmationDialog
 var wins_value: Label
+var item_rows: Array = []     # [ícone, texto] de cada item da legenda do lobby
+var item_locks: Array = []    # cadeado de cada item da legenda
 var time_value: Label
 var wait_label: Label
 var start_btn: Button
@@ -468,6 +472,13 @@ func rpc_cfg(w: int, t: int) -> void:
 
 
 @rpc("any_peer", "reliable")
+func rpc_toggle_item(item: int) -> void:
+	var r: Node = _room_of(_sender()) if Net.is_server else null
+	if r != null:
+		r.toggle_item(_sender(), item)
+
+
+@rpc("any_peer", "reliable")
 func rpc_bots(add: bool) -> void:
 	var r: Node = _room_of(_sender()) if Net.is_server else null
 	if r != null:
@@ -528,7 +539,7 @@ func rpc_action() -> void:
 # =================================================================== RPC: servidor -> clientes
 @rpc("authority", "reliable")
 func rpc_lobby(list: Array, leader: int, st: String, w: int, t: int, share: String, share_fixed: bool,
-		room_name: String, code: String) -> void:
+		room_name: String, code: String, blocked: int) -> void:
 	if Net.is_dedicated or view == null or _leaving:
 		return
 	cl_room_name = room_name
@@ -540,6 +551,7 @@ func rpc_lobby(list: Array, leader: int, st: String, w: int, t: int, share: Stri
 	cl_leader = leader
 	cl_cfg_wins = w
 	cl_cfg_time = t
+	cl_blocked_items = blocked
 	cl_state = st
 	view.set_roster(list)
 	if st == "lobby":
@@ -1501,21 +1513,31 @@ func _build_lobby() -> void:
 	items_vb.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	items_vb.add_theme_constant_override("separation", 8)
 	scroll.add_child(items_vb)
+	item_rows.clear()
+	item_locks.clear()
 	for i in range(1, G.ITEM_COUNT):
 		var row := HBoxContainer.new()
 		row.add_theme_constant_override("separation", 12)
 		var icon := ItemIcon.new()
 		icon.item = i
 		row.add_child(icon)
+		item_rows.append(icon)
 		var txt := VBoxContainer.new()
 		txt.add_theme_constant_override("separation", 0)
 		txt.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 		txt.add_child(MenuStyle.label(String(G.ITEM_NAMES[i]).to_upper(), 16, MenuStyle.AMBER, 4))
 		var d := MenuStyle.label(G.ITEM_DESCS[i], 14, Color(1, 1, 1, 0.9), 3)
 		d.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-		d.custom_minimum_size.x = 380
+		d.custom_minimum_size.x = 340
 		txt.add_child(d)
 		row.add_child(txt)
+		item_rows.append(txt)
+		# cadeado: o líder bloqueia/libera o item para as partidas desta sala
+		var lock := LockButton.new()
+		var it := i
+		lock.pressed.connect(func(): _to_server(&"rpc_toggle_item", [it]))
+		row.add_child(lock)
+		item_locks.append(lock)
 		items_vb.add_child(row)
 
 
@@ -1715,6 +1737,16 @@ func _refresh_lobby() -> void:
 	wait_label.visible = not is_leader
 	wait_label.text = "AGUARDANDO O LÍDER INICIAR A PARTIDA...\nVitórias para vencer: %d  •  Tempo: %s" % [cl_cfg_wins, _fmt_time(cl_cfg_time)]
 	wins_value.text = str(cl_cfg_wins)
+	# itens bloqueados: ícone e texto apagados, cadeado fechado (só o líder pode mexer)
+	for i in range(1, G.ITEM_COUNT):
+		var off := (cl_blocked_items & (1 << i)) != 0
+		var a := 0.3 if off else 1.0
+		(item_rows[(i - 1) * 2] as Control).modulate.a = a
+		(item_rows[(i - 1) * 2 + 1] as Control).modulate.a = a
+		var lock: LockButton = item_locks[i - 1]
+		lock.locked = off
+		lock.disabled = not is_leader
+		lock.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND if is_leader else Control.CURSOR_ARROW
 	time_value.text = _fmt_time(cl_cfg_time)
 	var n := cl_players.size()
 	start_btn.text = "INICIAR PARTIDA (%d JOGADOR%s)" % [n, "" if n == 1 else "ES"]

@@ -22,6 +22,7 @@ var order: Array = []      # ids em ordem de entrada (o primeiro humano é o lí
 var wins := {}
 var cfg_wins := 3
 var cfg_time := 180
+var blocked_items := 0      # bits (1 << item) dos itens que o líder bloqueou nesta sala
 var state := "lobby"       # lobby | round | round_end | match_end
 var roster: Array = []
 var sim: Node = null
@@ -187,7 +188,7 @@ func push_lobby() -> void:
 		var e: Dictionary = lobby[id]
 		list.append([id, e.name, e.color, e.bot])
 	send_all(&"rpc_lobby", [list, leader(), state, cfg_wins, cfg_time,
-		main.share_url, main.share_fixed, room_name, code])
+		main.share_url, main.share_fixed, room_name, code, blocked_items])
 
 
 func _wins_for(ids: Array) -> Dictionary:
@@ -213,6 +214,14 @@ func cfg(sender: int, w: int, t: int) -> void:
 		return
 	cfg_wins = clampi(w, 1, 9)
 	cfg_time = clampi(t, 60, 300)
+	push_lobby()
+
+
+## Líder bloqueia/libera um item: bloqueado não aparece nas partidas desta sala.
+func toggle_item(sender: int, item: int) -> void:
+	if sender != leader() or state != "lobby" or item <= G.I_NONE or item >= G.ITEM_COUNT:
+		return
+	blocked_items ^= 1 << item
 	push_lobby()
 
 
@@ -289,6 +298,7 @@ func _start_round() -> void:
 	for id in roster:
 		entries.append({"id": id, "name": lobby[id].name, "bot": lobby[id].bot})
 	entries.shuffle()
+	sim.blocked_items = blocked_items
 	sim.start_round(entries, float(cfg_time))
 	state = "round"
 	_snap_tick = 0
