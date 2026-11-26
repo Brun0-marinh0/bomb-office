@@ -25,11 +25,15 @@ const FullscreenButton = preload("res://scripts/fullscreen_button.gd")
 const Music = preload("res://scripts/music.gd")
 const SettingsMenu = preload("res://scripts/settings_menu.gd")
 const ItemIcon = preload("res://scripts/item_icon.gd")
-const LockButton = preload("res://scripts/lock_button.gd")
+const ItemToggle = preload("res://scripts/item_toggle.gd")
 const HudItemList = preload("res://scripts/item_list.gd")
 const WinnerDisplay = preload("res://scripts/winner_display.gd")
+const ResultsPanel = preload("res://scripts/results_panel.gd")
+const PlayerChip = preload("res://scripts/player_chip.gd")
 const WINNER_MSG_MAX := 20
-const ROUND_INPUT_GRACE_MS := 800   # bomba/ação ignoradas no começo da rodada (Enter do chat etc.)
+const LOBBY_ROW_H := 30
+const LOBBY_ROW_GAP := 4
+const ROUND_INPUT_GRACE_MS := 200   # respiro extra depois do 3-2-1 (Enter do chat etc.)
 const SETTINGS_PATH := "user://settings.cfg"
 const ABILITY_NAMES := ["Chute", "Luva", "Remoto", "Perfurante", "Linha", "Super Bomba",
 	"Atravessa paredes", "Atravessa bombas"]
@@ -50,7 +54,11 @@ var cl_players: Array = []
 var cl_leader := 0
 var cl_state := "lobby"
 var cl_cfg_wins := 3
-var _round_start_ms := 0    # quando a rodada atual começou (para o respiro de input)
+var _round_start_ms := 0    # quando a rodada atual libera (fim do 3-2-1), para o respiro de input
+var _countdown_token := 0
+var results: Control        # tela de resultado da partida (scripts/results_panel.gd)
+var cl_votes: Array = []
+var _was_connected := false  # para não mostrar "conexão caiu" sem ter conectado
 var cl_blocked_items := 0     # itens bloqueados pelo líder (bits 1 << item)
 var cl_cfg_time := 180
 var cl_roster: Array = []
@@ -90,6 +98,7 @@ var host_box: Control
 var status_label: Label
 var rooms_list: VBoxContainer
 var rooms_status: Label
+var room_name_error: Label
 var rooms_count: Label
 var room_name_edit: LineEdit
 var room_pass_edit: LineEdit
@@ -107,7 +116,7 @@ var close_dialog: ConfirmationDialog
 var wins_value: Label
 var item_rows: Array = []     # [ícone, texto] de cada item da legenda do lobby
 var items_scroll: ScrollContainer
-var item_locks: Array = []    # cadeado de cada item da legenda
+var item_locks: Array = []    # chave ATIVO/DESATIVADO de cada item da legenda
 var time_value: Label
 var wait_label: Label
 var start_btn: Button
@@ -118,6 +127,7 @@ var hud_items: HudItemList
 var hud_items_layer: CanvasLayer
 var hud_ping: Label
 var hud_abort: Button
+var abort_dialog: ConfirmationDialog
 var overlay: CenterContainer
 var overlay_label: Label
 var winner_disp: Control
@@ -132,6 +142,11 @@ var settings: Control
 var gear_btn: Button
 var music_vol := 0.8
 var sfx_vol := 0.8
+var crt := 1.0               # configurações > vídeo: intensidade do efeito de câmera
+var interference := true     # configurações > vídeo: glitch/chuvisco
+var colorblind := false      # configurações > acessibilidade
+var keys := SettingsMenu.default_keys()   # configurações > controles: ação -> [tecla, tecla]
+var help_label: Label
 var show_fs := false        # celular com tela cheia disponível (Android)
 var chips := {}
 var chip_ids: Array = []
@@ -470,6 +485,7 @@ func rpc_list_rooms(version: int) -> void:
 func rpc_outdated() -> void:
 	if Net.is_dedicated or view == null:
 		return
+	_was_connected = false
 	Net.leave()
 	_reset_room_state()
 	_leaving = false
@@ -510,6 +526,20 @@ func rpc_toggle_item(item: int) -> void:
 	var r: Node = _room_of(_sender()) if Net.is_server else null
 	if r != null:
 		r.toggle_item(_sender(), item)
+
+
+@rpc("any_peer", "reliable")
+func rpc_rematch() -> void:
+	var r: Node = _room_of(_sender()) if Net.is_server else null
+	if r != null:
+		r.vote_rematch(_sender())
+
+
+@rpc("any_peer", "reliable")
+func rpc_results_lobby() -> void:
+	var r: Node = _room_of(_sender()) if Net.is_server else null
+	if r != null:
+		r.results_to_lobby(_sender())
 
 
 @rpc("any_peer", "reliable")
@@ -664,13 +694,14 @@ func rpc_left_room(msg: String) -> void:
 
 
 @rpc("authority", "reliable")
-func rpc_round_start(n: int, ids: Array, w: Dictionary) -> void:
+func rpc_round_start(n: int, ids: Array, w: Dictionary, countdown: float) -> void:
 	if Net.is_dedicated or view == null or _leaving:
 		return
 	cl_roster = ids
 	cl_wins = w
 	cl_state = "round"
-	_round_start_ms = Time.get_ticks_msec()
+	results.visible = false
+	_round_start_ms = Time.get_ticks_msec() + int(countdown * 1000.0)
 	cl_map = [PackedByteArray(), PackedByteArray()]
 	view.reset()
 	view.my_id = my_id
@@ -682,8 +713,8 @@ func rpc_round_start(n: int, ids: Array, w: Dictionary) -> void:
 	var txt := "RODADA %d" % n
 	if my_id in ids:
 		var c := _color_of(my_id)
-		txt += "\nVocê é o bloco %s" % G.PLAYER_COLOR_NAMES[c]
-	_show_overlay(txt, 2.0)
+		txt += "\nVocê é o bloco %s" % G.player_color_name(c)
+	_run_countdown(txt, countdown)
 	cctv.round_cut(n)
 	if args.has("autojoin"):
 		print("[cliente] rodada %d começou" % n)
@@ -751,6 +782,10 @@ func rpc_event(kind: String, data: Array) -> void:
 		"death":
 			if data[0] == my_id:
 				_show_overlay("Você foi eliminado!", 1.5)
+		"heart":
+			if data[0] == my_id:
+				hud_items.lose("heart")
+				_show_overlay("CORAÇÃO USADO!\nVocê sobreviveu à explosão", 1.2)
 
 
 @rpc("authority", "reliable")
@@ -777,17 +812,44 @@ func rpc_winner_text(winner: int, text: String) -> void:
 		return
 	if winner_disp.visible and cl_winner == winner:
 		winner_disp.message = text
+	if results.visible and cl_winner == winner:
+		results.set_message(text)
 	if args.has("autojoin"):
 		print("[cliente] mensagem do vencedor recebida: %s" % text)
 
 
+## 3-2-1 antes de liberar o movimento (o servidor só começa a simular depois dele).
+func _run_countdown(header: String, secs: float) -> void:
+	_countdown_token += 1
+	var tok := _countdown_token
+	for i in range(ceili(secs), 0, -1):
+		_show_overlay("%s\n\n%d" % [header, i], 0.0)
+		await get_tree().create_timer(1.0).timeout
+		if tok != _countdown_token or screen != "game":
+			return
+	_show_overlay("VAI!", 0.6)
+
+
 @rpc("authority", "reliable")
-func rpc_match_end(winner: int, w: Dictionary) -> void:
+func rpc_match_end(winner: int, w: Dictionary, stats: Array, secs: float) -> void:
 	if Net.is_dedicated or view == null:
 		return
 	cl_wins = w
+	cl_state = "match_end"
 	view.winner = winner
-	_show_winner_overlay(winner, "%s É O CAMPEÃO!" % _name_of(winner).to_upper(), w)
+	overlay.visible = false
+	var names := {}
+	var colors := {}
+	for r in stats:
+		names[r[0]] = _name_of(r[0])
+		colors[r[0]] = _color_of(r[0])
+	var title := "%s É O CAMPEÃO!" % _name_of(winner).to_upper() if winner != 0 else "FIM DE PARTIDA"
+	cl_winner = winner
+	var can_write := winner == my_id and not _is_bot(winner)
+	dir_stack.clear()
+	results.show_results(title, stats, names, colors, my_id, my_id == cl_leader, can_write, secs)
+	touch.visible = false
+	cl_votes = []
 	if args.has("autojoin"):
 		print("[cliente] campeão: %s" % _name_of(winner))
 		if args.has("autoquit"):
@@ -809,6 +871,7 @@ func _connect_to(url: String) -> void:
 
 
 func _on_connected() -> void:
+	_was_connected = true
 	my_id = multiplayer.get_unique_id()
 	status_label.text = "Conectado!"
 	_rooms_first = true
@@ -833,7 +896,9 @@ func _on_server_disconnected() -> void:
 	_reset_room_state()
 	_leaving = false
 	_show("menu")
-	status_label.text = "A conexão com o servidor caiu."
+	# só avisa se estava mesmo conectado (não na tela de login antes de tentar)
+	status_label.text = "A conexão com o servidor caiu. Clique em ENTRAR para reconectar." if _was_connected else ""
+	_was_connected = false
 	if args.has("autoquit"):
 		get_tree().quit(1)
 
@@ -884,6 +949,7 @@ func _reset_room_state() -> void:
 
 ## "VOLTAR" na lista de salas: desconecta e volta ao menu.
 func _on_back_pressed() -> void:
+	_was_connected = false
 	Net.leave()
 	for c in rooms:
 		rooms[c].queue_free()
@@ -936,16 +1002,18 @@ func _joy_dir() -> Vector2i:
 	return Vector2i(0, int(signf(v.y)))
 
 
+## Direção da tecla, conforme o mapeamento das configurações.
 func _key_dir(k: int) -> Vector2i:
-	match k:
-		KEY_W, KEY_UP:
-			return Vector2i(0, -1)
-		KEY_S, KEY_DOWN:
-			return Vector2i(0, 1)
-		KEY_A, KEY_LEFT:
-			return Vector2i(-1, 0)
-		KEY_D, KEY_RIGHT:
-			return Vector2i(1, 0)
+	if k == 0:
+		return Vector2i.ZERO
+	if k in keys.up:
+		return Vector2i(0, -1)
+	if k in keys.down:
+		return Vector2i(0, 1)
+	if k in keys.left:
+		return Vector2i(-1, 0)
+	if k in keys.right:
+		return Vector2i(1, 0)
 	return Vector2i.ZERO
 
 
@@ -969,11 +1037,11 @@ func _unhandled_input(event: InputEvent) -> void:
 				dir_stack.append(d)
 			get_viewport().set_input_as_handled()
 		elif event.pressed:
-			if k in [KEY_SPACE, KEY_J, KEY_Z, KEY_ENTER, KEY_KP_0]:
+			if k in keys.bomb:
 				if _can_act():
 					_to_server(&"rpc_bomb")
 				get_viewport().set_input_as_handled()
-			elif k in [KEY_SHIFT, KEY_K, KEY_X, KEY_E, KEY_CTRL]:
+			elif k in keys.action:
 				if _can_act():
 					_to_server(&"rpc_action")
 				get_viewport().set_input_as_handled()
@@ -988,6 +1056,17 @@ func _unhandled_input(event: InputEvent) -> void:
 ## uma tecla apertada no fim da rodada anterior (ex.: Enter do chat) não solta bomba no nascimento.
 func _can_act() -> bool:
 	return cl_state == "round" and Time.get_ticks_msec() - _round_start_ms >= ROUND_INPUT_GRACE_MS
+
+
+@rpc("authority", "reliable")
+func rpc_rematch_votes(voters: Array, needed: int) -> void:
+	if Net.is_dedicated or view == null:
+		return
+	cl_votes = voters
+	var names := {}
+	for id in voters:
+		names[id] = _name_of(id)
+	results.set_votes(voters, needed, my_id, names)
 
 
 func _notification(what: int) -> void:
@@ -1107,6 +1186,10 @@ func _build_ui() -> void:
 	settings = SettingsMenu.new()
 	settings.music_vol = music_vol
 	settings.sfx_vol = sfx_vol
+	settings.crt = crt
+	settings.interference = interference
+	settings.colorblind = colorblind
+	settings.keys = keys.duplicate(true)
 	settings.test_sfx = func(): view.play_boom()
 	ui.add_child(settings)
 	gear_btn.pressed.connect(settings.open)
@@ -1117,6 +1200,35 @@ func _build_ui() -> void:
 		music_vol = m
 		sfx_vol = f
 		_save_settings())
+	settings.prefs_changed.connect(func():
+		crt = settings.crt
+		interference = settings.interference
+		var palette_changed: bool = colorblind != settings.colorblind
+		colorblind = settings.colorblind
+		keys = settings.keys.duplicate(true)
+		dir_stack.clear()
+		_apply_prefs(palette_changed)
+		_save_settings())
+	_apply_prefs(false)
+
+
+## Aplica vídeo/acessibilidade/controles escolhidos nas configurações.
+func _apply_prefs(palette_changed: bool) -> void:
+	cctv.set_intensity(crt, interference)
+	G.colorblind = colorblind
+	help_label.text = _help_text()
+	if palette_changed:
+		_refresh_lobby()
+		if not chip_ids.is_empty():
+			_rebuild_chips(chip_ids)
+
+
+func _help_text() -> String:
+	var mv := PackedStringArray()
+	for a in ["up", "left", "down", "right"]:
+		mv.append(SettingsMenu.key_name(keys[a][0]))
+	return "Teclado: %s movem • %s solta bomba • %s ação  (mude em Configurações)\nCelular: direcional à esquerda, botões à direita" % [
+		"/".join(mv), SettingsMenu.key_name(keys.bomb[0]), SettingsMenu.key_name(keys.action[0])]
 
 
 ## Inicialização do "sistema de câmeras" ao abrir o jogo (clique/toque/tecla pula).
@@ -1241,7 +1353,7 @@ func _build_menu() -> void:
 	MenuStyle.style_label(status_label, 16, MenuStyle.AMBER)
 	col.add_child(status_label)
 	var help := Label.new()
-	help.text = "Teclado: Setas/WASD movem • Espaço solta bomba • Shift/E ação\nCelular: direcional à esquerda, botões à direita"
+	help_label = help
 	help.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	MenuStyle.style_label(help, 15, MenuStyle.TEXT)
 	help.set_anchors_and_offsets_preset(Control.PRESET_BOTTOM_WIDE)
@@ -1307,6 +1419,10 @@ func _build_rooms() -> void:
 	room_name_edit.placeholder_text = "ex.: Sala do TI"
 	MenuStyle.style_line_edit(room_name_edit, 20)
 	right.add_child(room_name_edit)
+	room_name_error = MenuStyle.label("", 15, MenuStyle.REC, 3)
+	room_name_error.visible = false
+	right.add_child(room_name_error)
+	room_name_edit.text_changed.connect(func(_t): _set_room_name_error(""))
 	right.add_child(MenuStyle.label("SENHA (OPCIONAL)", 16, MenuStyle.MUTED, 4))
 	room_pass_edit = LineEdit.new()
 	room_pass_edit.max_length = ROOM_PASS_MAX
@@ -1424,12 +1540,26 @@ func _ask_password(code: String, msg: String) -> void:
 func _on_create_pressed() -> void:
 	var rname := room_name_edit.text.strip_edges()
 	if rname == "":
-		rooms_status.text = "Dê um nome para a sala."
+		_set_room_name_error("Dê um nome para a sala.")
 		room_name_edit.grab_focus()
 		return
+	_set_room_name_error("")
 	rooms_status.text = ""
 	_to_server(&"rpc_create_room", [rname, room_pass_edit.text, player_name])
 	room_pass_edit.text = ""
+
+
+## Erro do campo "nome da sala": texto logo abaixo dele e borda vermelha.
+func _set_room_name_error(msg: String) -> void:
+	room_name_error.text = msg
+	room_name_error.visible = msg != ""
+	for st in ["normal", "focus"]:
+		var sb: StyleBoxFlat = room_name_edit.get_theme_stylebox(st).duplicate()
+		if msg != "":
+			sb.border_color = MenuStyle.REC
+		else:
+			sb.border_color = MenuStyle.AMBER if st == "focus" else MenuStyle.MUTED
+		room_name_edit.add_theme_stylebox_override(st, sb)
 
 
 func _build_lobby() -> void:
@@ -1489,7 +1619,9 @@ func _build_lobby() -> void:
 	lp.add_child(left)
 	left.add_child(MenuStyle.label("JOGADORES  (MÁX. %d)" % G.MAX_PLAYERS, 20, MenuStyle.AMBER))
 	lobby_list = VBoxContainer.new()
-	lobby_list.add_theme_constant_override("separation", 6)
+	lobby_list.add_theme_constant_override("separation", LOBBY_ROW_GAP)
+	# altura fixa para 8 linhas: o painel (e o botão "+ BOT") não muda de lugar ao entrar alguém
+	lobby_list.custom_minimum_size.y = G.MAX_PLAYERS * LOBBY_ROW_H + (G.MAX_PLAYERS - 1) * LOBBY_ROW_GAP
 	left.add_child(lobby_list)
 	var spacer := Control.new()
 	spacer.custom_minimum_size.y = 6
@@ -1586,12 +1718,12 @@ func _build_lobby() -> void:
 		txt.add_child(MenuStyle.label(String(G.ITEM_NAMES[i]).to_upper(), 16, MenuStyle.AMBER, 4))
 		var d := MenuStyle.label(G.ITEM_DESCS[i], 14, Color(1, 1, 1, 0.9), 3)
 		d.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-		d.custom_minimum_size.x = 340
+		d.custom_minimum_size.x = 290
 		txt.add_child(d)
 		row.add_child(txt)
 		item_rows.append(txt)
-		# cadeado: o líder bloqueia/libera o item para as partidas desta sala
-		var lock := LockButton.new()
+		# chave ATIVO/DESATIVADO: o líder liga/desliga o item para as partidas desta sala
+		var lock := ItemToggle.new()
 		lock.mouse_filter = Control.MOUSE_FILTER_PASS
 		var it := i
 		lock.pressed.connect(func(): _to_server(&"rpc_toggle_item", [it]))
@@ -1630,8 +1762,17 @@ func _build_hud() -> void:
 	hud_abort.offset_right = right
 	hud_abort.offset_top = 8
 	hud_abort.offset_bottom = 8 + gs
-	hud_abort.pressed.connect(func(): _to_server(&"rpc_abort"))
+	hud_abort.pressed.connect(func(): abort_dialog.popup_centered())
 	hud.add_child(hud_abort)
+	# clique sem querer no ícone não pode derrubar a partida de todo mundo
+	abort_dialog = ConfirmationDialog.new()
+	abort_dialog.title = "Encerrar partida"
+	abort_dialog.dialog_text = "A partida acaba para todos e vocês voltam para a sala de espera.\nDeseja encerrar?"
+	abort_dialog.ok_button_text = "Encerrar partida"
+	abort_dialog.cancel_button_text = "Continuar jogando"
+	abort_dialog.confirmed.connect(func(): _to_server(&"rpc_abort"))
+	abort_dialog.theme = MenuStyle.dialog_theme()
+	ui.add_child(abort_dialog)
 	hud_stats = _label("", 16)
 	hud_stats.set_anchors_and_offsets_preset(Control.PRESET_BOTTOM_WIDE)
 	hud_stats.offset_top = -34
@@ -1695,6 +1836,12 @@ func _build_overlay() -> void:
 	msg_row.add_child(msg_edit)
 	msg_row.add_child(_button("Enviar", _send_winner_msg, 16))
 	vb.add_child(msg_row)
+	results = ResultsPanel.new()
+	ui.add_child(results)
+	results.rematch_pressed.connect(func(): _to_server(&"rpc_rematch"))
+	results.lobby_pressed.connect(func(): _to_server(&"rpc_results_lobby"))
+	results.leave_pressed.connect(_on_leave_room_pressed)
+	results.message_sent.connect(func(t: String): _to_server(&"rpc_winner_msg", [t]))
 
 
 func _show(which: String) -> void:
@@ -1717,6 +1864,7 @@ func _show(which: String) -> void:
 		items_scroll.set_deferred("scroll_vertical", 0)   # legenda de itens sempre começa do topo
 	if which != "game":
 		overlay.visible = false
+		results.visible = false
 		dir_stack.clear()
 
 
@@ -1729,7 +1877,7 @@ func _show_winner_overlay(winner: int, title: String, w: Dictionary) -> void:
 	if winner == 0:
 		return
 	var keep_msg: String = winner_disp.message if same_winner else ""
-	winner_disp.show_winner(G.PLAYER_COLORS[_color_of(winner)])
+	winner_disp.show_winner(G.player_color(_color_of(winner)))
 	winner_disp.message = keep_msg
 	winner_disp.visible = true
 	cl_winner = winner
@@ -1777,9 +1925,10 @@ func _refresh_lobby() -> void:
 	for e in cl_players:
 		var hb := HBoxContainer.new()
 		hb.add_theme_constant_override("separation", 10)
+		hb.custom_minimum_size.y = LOBBY_ROW_H
 		var sw := Panel.new()
 		var sb := StyleBoxFlat.new()
-		sb.bg_color = G.PLAYER_COLORS[int(e[2]) % G.PLAYER_COLORS.size()]
+		sb.bg_color = G.player_color(int(e[2]))
 		sb.border_color = MenuStyle.INK
 		sb.set_border_width_all(2)
 		sb.skew = Vector2(0.25, 0)
@@ -1798,15 +1947,15 @@ func _refresh_lobby() -> void:
 	wait_label.visible = not is_leader
 	wait_label.text = "AGUARDANDO O LÍDER INICIAR A PARTIDA...\nVitórias para vencer: %d  •  Tempo: %s" % [cl_cfg_wins, _fmt_time(cl_cfg_time)]
 	wins_value.text = str(cl_cfg_wins)
-	# itens bloqueados: ícone e texto apagados, cadeado fechado (só o líder pode mexer)
+	# itens desativados: ícone e texto apagados, chave em DESATIVADO (só o líder pode mexer)
 	for i in range(1, G.ITEM_COUNT):
 		var off := (cl_blocked_items & (1 << i)) != 0
 		var a := 0.3 if off else 1.0
 		(item_rows[(i - 1) * 2] as Control).modulate.a = a
 		(item_rows[(i - 1) * 2 + 1] as Control).modulate.a = a
-		var lock: LockButton = item_locks[i - 1]
-		lock.locked = off
+		var lock: ItemToggle = item_locks[i - 1]
 		lock.disabled = not is_leader
+		lock.active = not off
 		lock.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND if is_leader else Control.CURSOR_ARROW
 	time_value.text = _fmt_time(cl_cfg_time)
 	var n := cl_players.size()
@@ -1861,16 +2010,10 @@ func _rebuild_chips(ids: Array) -> void:
 		c.queue_free()
 	chips.clear()
 	for id in ids:
-		var hb := HBoxContainer.new()
-		var sw := ColorRect.new()
-		sw.custom_minimum_size = Vector2(16, 16)
-		sw.color = G.PLAYER_COLORS[_color_of(id)]
-		sw.size_flags_vertical = Control.SIZE_SHRINK_CENTER
-		hb.add_child(sw)
-		var lb := _label(_name_of(id), 15)
-		hb.add_child(lb)
-		hud_chips.add_child(hb)
-		chips[id] = [hb, lb]
+		var chip := PlayerChip.new()
+		hud_chips.add_child(chip)
+		chip.set_state(_name_of(id), true, _color_of(id))
+		chips[id] = chip
 
 
 func _update_hud(s: Array) -> void:
@@ -1886,8 +2029,7 @@ func _update_hud(s: Array) -> void:
 	for e in s[4]:
 		var id: int = e[0]
 		if chips.has(id):
-			(chips[id][1] as Label).text = "%s  %d" % [_name_of(id), int(cl_wins.get(id, 0))]
-			(chips[id][0] as Control).modulate.a = 1.0 if e[3] else 0.3
+			(chips[id] as PlayerChip).set_state("%s  %d" % [_name_of(id), int(cl_wins.get(id, 0))], e[3], _color_of(id))
 		if id == my_id:
 			mine = e
 	hud_abort.visible = my_id == cl_leader
@@ -1904,14 +2046,12 @@ func _update_hud(s: Array) -> void:
 	hud_stats.text = ""
 	# lista de itens coletados (cada linha aparece/some com animação no painel)
 	var list: Array = []
-	if int(mine[8]) > G.START_BOMBS:
-		list.append({key = "bombs", text = "Bombas +%d" % (int(mine[8]) - G.START_BOMBS)})
-	if int(mine[9]) >= G.MAX_FIRE:
-		list.append({key = "fire", text = "Fogo máximo"})
-	elif int(mine[9]) > G.START_FIRE:
-		list.append({key = "fire", text = "Fogo +%d" % (int(mine[9]) - G.START_FIRE)})
-	if int(mine[10]) > 0:
-		list.append({key = "speed", text = "Patins +%d" % int(mine[10])})
+	# números sempre visíveis: bombas disponíveis/total, alcance e velocidade
+	var bmax := int(mine[8])
+	list.append({key = "bombs", text = "Bombas %d/%d" % [maxi(0, bmax - int(mine[15])), bmax], quiet = true})
+	var fire := int(mine[9])
+	list.append({key = "fire", text = "Alcance máx." if fire >= G.MAX_FIRE else "Alcance %d" % fire, quiet = true})
+	list.append({key = "speed", text = "Velocidade +%d" % int(mine[10]), quiet = true})
 	var bits: int = mine[6]
 	for i in ABILITY_NAMES.size():
 		if (bits & (1 << i)) != 0:
@@ -1940,8 +2080,8 @@ func _name_of(id: int) -> String:
 func _color_of(id: int) -> int:
 	for e in cl_players:
 		if e[0] == id:
-			return int(e[2]) % G.PLAYER_COLORS.size()
-	return int(view.colors.get(id, 0)) % G.PLAYER_COLORS.size()
+			return posmod(int(e[2]), G.PLAYER_COLORS.size())
+	return posmod(int(view.colors.get(id, 0)), G.PLAYER_COLORS.size())
 
 
 func _scoreboard(w: Dictionary) -> String:
@@ -1964,6 +2104,14 @@ func _load_settings() -> void:
 		player_name = str(cf.get_value("player", "name", ""))
 		music_vol = clampf(float(cf.get_value("audio", "music", 0.8)), 0.0, 1.0)
 		sfx_vol = clampf(float(cf.get_value("audio", "sfx", 0.8)), 0.0, 1.0)
+		crt = clampf(float(cf.get_value("video", "crt", 1.0)), 0.0, 1.0)
+		interference = bool(cf.get_value("video", "interference", true))
+		colorblind = bool(cf.get_value("access", "colorblind", false))
+		for a in SettingsMenu.ACTIONS:
+			var v = cf.get_value("keys", a, null)
+			if v is Array and (v as Array).size() == 2:
+				keys[a] = [int(v[0]), int(v[1])]
+	G.colorblind = colorblind
 
 
 func _save_settings() -> void:
@@ -1971,4 +2119,9 @@ func _save_settings() -> void:
 	cf.set_value("player", "name", player_name)
 	cf.set_value("audio", "music", music_vol)
 	cf.set_value("audio", "sfx", sfx_vol)
+	cf.set_value("video", "crt", crt)
+	cf.set_value("video", "interference", interference)
+	cf.set_value("access", "colorblind", colorblind)
+	for a in keys:
+		cf.set_value("keys", a, keys[a])
 	cf.save(SETTINGS_PATH)

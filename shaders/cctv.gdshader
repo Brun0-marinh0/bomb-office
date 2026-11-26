@@ -12,6 +12,7 @@ uniform float aberration = 1.6;     // separação de cor nas bordas (px)
 uniform float grain = 0.05;
 uniform float vignette = 0.45;
 uniform float line_dark = 0.13;     // linhas de TV (como no menu: 1 a cada 4 px)
+uniform float vhs_bar = 0.035;      // faixa clara de fita VHS descendo
 
 float hash(vec2 p) {
 	return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453);
@@ -46,7 +47,7 @@ void fragment() {
 	float line = mod(floor(uv.y / px.y), 4.0) < 1.0 ? 1.0 - line_dark : 1.0;
 	col *= line;
 	float bar_y = fract(TIME * 0.11) * 1.3 - 0.15;
-	col += step(bar_y, uv.y) * step(uv.y, bar_y + 0.055) * 0.035;
+	col += step(bar_y, uv.y) * step(uv.y, bar_y + 0.055) * vhs_bar;
 
 	// granulado fino
 	col += (hash(uv * vec2(1131.0, 771.0) + fract(TIME * 7.0) * 91.0) - 0.5) * grain;

@@ -387,6 +387,7 @@ func _draw() -> void:
 	var sorted := players.duplicate()
 	# mortos primeiro (ficam por baixo), depois os vivos de cima para baixo
 	sorted.sort_custom(func(a, b): return (not a[3]) if a[3] != b[3] else a[2] < b[2])
+	var tags: Array = []   # [id, posição do nome, cor] dos vivos
 	for e in sorted:
 		var id: int = e[0]
 		var frame := _player_frame(e)
@@ -396,7 +397,7 @@ func _draw() -> void:
 		var center := pos * T
 		var r := Rect2(center - Vector2(T, T) * 0.5, Vector2(T, T))
 		var bits: int = e[6]
-		var col: Color = G.PLAYER_COLORS[int(colors.get(id, 0)) % G.PLAYER_COLORS.size()]
+		var col: Color = G.player_color(int(colors.get(id, 0)))
 		if not e[3]:
 			# corpo fica no chão, desbotando depois da animação de morte
 			var since := t - float(death_t.get(id, -100.0))
@@ -422,11 +423,35 @@ func _draw() -> void:
 			draw_rect(r.grow(-1.0), Color(0.3, 1.0, 0.5, 0.9), false, 2.0)
 		if (bits & 1024) != 0:
 			draw_rect(Rect2(r.position + Vector2(T - 9, 1), Vector2(7, 6)), Color(1.0, 0.35, 0.5))
+		tags.append([id, Vector2(center.x, r.position.y - 3), col])
+
+	# ---- nomes: desenhados depois de todos os corpos e empilhados quando dois jogadores
+	# estão na mesma casa (senão um nome cobre o outro e parece que alguém sumiu)
+	var placed: Array = []
+	var my_tag = null
+	for tg in tags:
+		var p: Vector2 = tg[1]
+		var moved := true
+		while moved:
+			moved = false
+			for q in placed:
+				if absf(p.x - q.x) < 46.0 and absf(p.y - q.y) < 11.0:
+					p.y = q.y - 11.0
+					moved = true
+		placed.append(p)
+		var id: int = tg[0]
 		var nm: String = names.get(id, "?")
-		var npos := Vector2(center.x - 50, r.position.y - 3)
 		var ncol := Color(1, 0.92, 0.3) if id == my_id else Color.WHITE
+		var tw := font.get_string_size(nm, HORIZONTAL_ALIGNMENT_LEFT, -1, 10).x
+		# quadradinho da cor do jogador antes do nome: identifica mesmo com os corpos sobrepostos
+		var sq := Rect2(Vector2(p.x - tw * 0.5 - 9, p.y - 7), Vector2(6, 6))
+		draw_rect(sq.grow(1.0), Color(0, 0, 0, 0.85))
+		draw_rect(sq, Color(tg[2], 1.0))
+		var npos := Vector2(p.x - 50, p.y)
 		draw_string_outline(font, npos, nm, HORIZONTAL_ALIGNMENT_CENTER, 100, 10, 3, Color(0, 0, 0, 0.85))
 		draw_string(font, npos, nm, HORIZONTAL_ALIGNMENT_CENTER, 100, 10, ncol)
 		if id == my_id:
-			var tip := Vector2(center.x, r.position.y - 14)
-			draw_colored_polygon(PackedVector2Array([tip, tip + Vector2(-5, -6), tip + Vector2(5, -6)]), ncol)
+			my_tag = [p, ncol]
+	if my_tag != null:
+		var tip: Vector2 = my_tag[0] + Vector2(0, -11)
+		draw_colored_polygon(PackedVector2Array([tip, tip + Vector2(-5, -6), tip + Vector2(5, -6)]), my_tag[1])

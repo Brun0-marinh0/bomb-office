@@ -12,6 +12,7 @@ var tiles := PackedByteArray()
 var items := PackedByteArray()
 var blocked_items := 0      # bits (1 << item) dos itens bloqueados pelo líder da sala
 var flames := PackedFloat32Array()
+var flame_owner := PackedInt32Array()   # dono da bomba que fez o fogo (estatística de abates)
 var burn := PackedFloat32Array()
 var bombs: Array = []
 var players: Dictionary = {}             # id -> Dictionary
@@ -41,6 +42,8 @@ func start_round(roster: Array, round_time: float) -> void:
 	items.fill(G.I_NONE)
 	flames.resize(n)
 	flames.fill(0.0)
+	flame_owner.resize(n)
+	flame_owner.fill(0)
 	burn.resize(n)
 	burn.fill(0.0)
 	bombs.clear()
@@ -74,6 +77,7 @@ func _new_player(r: Dictionary, spawn: Vector2i) -> Dictionary:
 		"vest_t": 0.0, "hearts": 0, "invuln_t": 0.0,
 		"disease": G.D_NONE, "disease_t": 0.0,
 		"collected": [], "ai_path": [], "ai_timer": 0.0, "moving": false,
+		"kills": 0, "suicide": false, "picked": 0,   # estatísticas da rodada (tela de resultado)
 	}
 
 
@@ -492,6 +496,7 @@ func _explode(b: Dictionary) -> void:
 	var origin: Vector2i = b.cell
 	var ok: int = G.idx(origin)
 	flames[ok] = G.FLAME_TIME
+	flame_owner[ok] = b.owner
 	items[ok] = G.I_NONE
 	for d in G.DIRS:
 		for i in range(1, int(b.range) + 1):
@@ -505,6 +510,7 @@ func _explode(b: Dictionary) -> void:
 			if t == G.T_SOFT:
 				tiles[k] = G.T_BURNING
 				burn[k] = G.FLAME_TIME
+				flame_owner[k] = b.owner
 				if b.pierce:
 					continue
 				break
@@ -513,6 +519,7 @@ func _explode(b: Dictionary) -> void:
 					continue
 				break
 			flames[k] = G.FLAME_TIME
+			flame_owner[k] = b.owner
 			var ob = _bomb_at(c)
 			if ob != null:
 				ob.remote = false
@@ -545,10 +552,10 @@ func _check_hits() -> void:
 			continue
 		var k: int = G.idx(G.cell_of(p.pos))
 		if flames[k] > 0.0 or tiles[k] == G.T_BURNING:
-			_hurt(p)
+			_hurt(p, flame_owner[k])
 
 
-func _hurt(p: Dictionary) -> void:
+func _hurt(p: Dictionary, killer := 0) -> void:
 	if p.invuln_t > 0.0 or p.vest_t > 0.0:
 		return
 	if p.hearts > 0:
@@ -556,20 +563,25 @@ func _hurt(p: Dictionary) -> void:
 		p.invuln_t = G.HEART_INVULN
 		game_event.emit("heart", [p.id])
 		return
-	_kill(p)
+	_kill(p, killer)
 
 
-func _kill(p: Dictionary) -> void:
+## killer: id do dono da bomba (0 = morte súbita / sem dono).
+func _kill(p: Dictionary, killer := 0) -> void:
 	if not p.alive:
 		return
 	p.alive = false
+	if killer == p.id:
+		p.suicide = true
+	elif killer != 0 and players.has(killer):
+		players[killer].kills += 1
 	p.dir = Vector2i.ZERO
 	for b in bombs:
 		if b.owner == p.id:
 			b.remote = false
 	_scatter(p.collected)
 	p.collected = []
-	game_event.emit("death", [p.id])
+	game_event.emit("death", [p.id, killer])
 
 
 ## Ao morrer, os itens coletados se espalham pela arena.
@@ -597,6 +609,7 @@ func _check_pickups() -> void:
 		var it: int = items[k]
 		if it != G.I_NONE and tiles[k] == G.T_EMPTY:
 			items[k] = G.I_NONE
+			p.picked += 1
 			_apply_item(p, it)
 			game_event.emit("item", [p.id, it])
 
@@ -721,7 +734,7 @@ func snapshot() -> Array:
 	var pl: Array = []
 	for p in players.values():
 		pl.append([p.id, p.pos.x, p.pos.y, p.alive, p.facing.x, p.facing.y, _bits(p), p.disease,
-			p.bombs_max, p.fire, p.speed_lvl, p.disease_t, p.vest_t, p.wall_t, p.bomb_pass_t])
+			p.bombs_max, p.fire, p.speed_lvl, p.disease_t, p.vest_t, p.wall_t, p.bomb_pass_t, _count_bombs(p.id)])
 	var bl: Array = []
 	for b in bombs:
 		var z := 0.0

@@ -11,7 +11,7 @@ const DEFAULT_PORT := 9080
 # versão do protocolo de rede: AUMENTE sempre que mudar RPCs ou o formato do snapshot.
 # Cliente com versão diferente do servidor (aba aberta antes de atualizar) é recusado,
 # em vez de entrar na sala e decodificar o snapshot errado.
-const PROTOCOL := 1
+const PROTOCOL := 2
 
 # ---------------------------------------------------------------- tiles
 const T_EMPTY := 0
@@ -113,11 +113,30 @@ const SUDDEN_DEATH_AT := 60.0   # segundos restantes quando começa a morte súb
 const SUDDEN_STEP := 0.3        # intervalo entre blocos caindo
 const CORNER_ASSIST := 0.12     # quanto desalinhado ainda "escorrega" para o corredor
 const ROUND_END_DELAY := 2.0    # espera para detectar mortes simultâneas (empate)
+const COUNTDOWN := 3.0          # 3-2-1 no começo de cada rodada (ninguém se move)
 
 const PLAYER_COLORS := [Color(0.95, 0.95, 0.95), Color(0.92, 0.22, 0.22), Color(0.25, 0.45, 1.0),
 	Color(0.20, 0.85, 0.30), Color(1.0, 0.85, 0.15), Color(1.0, 0.45, 0.80), Color(0.25, 0.92, 0.95),
 	Color(0.62, 0.38, 0.95)]
 const PLAYER_COLOR_NAMES := ["Branco", "Vermelho", "Azul", "Verde", "Amarelo", "Rosa", "Ciano", "Roxo"]
+# paleta para daltonismo (Okabe-Ito): cores que continuam distintas com deuteranopia/protanopia
+const PLAYER_COLORS_CB := [Color(0.95, 0.95, 0.95), Color(0.90, 0.62, 0.0), Color(0.34, 0.71, 0.91),
+	Color(0.0, 0.62, 0.45), Color(0.94, 0.89, 0.26), Color(0.0, 0.45, 0.70), Color(0.84, 0.37, 0.0),
+	Color(0.80, 0.47, 0.65)]
+const PLAYER_COLOR_NAMES_CB := ["Branco", "Laranja", "Celeste", "Verde", "Amarelo", "Azul", "Vermelhão", "Lilás"]
+
+# acessibilidade (só no cliente; configurações): paleta para daltonismo
+static var colorblind := false
+
+
+static func player_color(i: int) -> Color:
+	var pal: Array = PLAYER_COLORS_CB if colorblind else PLAYER_COLORS
+	return pal[posmod(i, pal.size())]
+
+
+static func player_color_name(i: int) -> String:
+	var names: Array = PLAYER_COLOR_NAMES_CB if colorblind else PLAYER_COLOR_NAMES
+	return names[posmod(i, names.size())]
 
 # 4 cantos primeiro, depois o meio de cada lado
 const SPAWNS := [Vector2i(1, 1), Vector2i(15, 11), Vector2i(15, 1), Vector2i(1, 11),

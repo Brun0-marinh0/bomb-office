@@ -56,6 +56,7 @@ static func encode(ms: int, s: Array, with_map: bool) -> PackedByteArray:
 		b.put_u8(clampi(ceili(float(p[12])), 0, 255))
 		b.put_u8(clampi(ceili(float(p[13])), 0, 255))
 		b.put_u8(clampi(ceili(float(p[14])), 0, 255))
+		b.put_u8(clampi(int(p[15]), 0, 255))
 	var bl: Array = s[5]
 	b.put_u16(bl.size())
 	for e in bl:
@@ -104,8 +105,9 @@ static func decode(data: PackedByteArray, map: Array) -> Array:
 		var vest_t := float(b.get_u8())
 		var wall_t := float(b.get_u8())
 		var bomb_pass_t := float(b.get_u8())
+		var bombs_out := b.get_u8()   # bombas dele no mapa agora
 		pl.append([id, x, y, (st & 1) != 0, ((st >> 1) & 3) - 1, ((st >> 3) & 3) - 1, bits,
-			disease, bombs, fire, speed, disease_t, vest_t, wall_t, bomb_pass_t])
+			disease, bombs, fire, speed, disease_t, vest_t, wall_t, bomb_pass_t, bombs_out])
 	var bl: Array = []
 	for i in b.get_u16():
 		var id := b.get_u32()
