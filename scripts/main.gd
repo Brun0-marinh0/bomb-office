@@ -32,6 +32,8 @@ const ResultsPanel = preload("res://scripts/results_panel.gd")
 const PlayerChip = preload("res://scripts/player_chip.gd")
 const WINNER_MSG_MAX := 20
 const LOBBY_ROW_H := 30
+const BOT_LEVELS := ["FÁCIL", "NORMAL", "DIFÍCIL"]
+const BOT_LEVEL_COLORS := [Color(0.35, 0.95, 0.45), Color(1.0, 0.72, 0.2), Color(1.0, 0.3, 0.25)]
 const LOBBY_ROW_GAP := 4
 const ROUND_INPUT_GRACE_MS := 200   # respiro extra depois do 3-2-1 (Enter do chat etc.)
 const SETTINGS_PATH := "user://settings.cfg"
@@ -65,6 +67,7 @@ var cl_roster: Array = []
 var cl_wins := {}
 var dir_stack: Array = []
 var last_dir := Vector2i.ZERO
+var last_dir2 := Vector2i.ZERO
 var auto_started := false
 var _snap_count := 0
 var cl_map: Array = [PackedByteArray(), PackedByteArray()]   # último mapa recebido [blocos, itens]
@@ -529,6 +532,13 @@ func rpc_toggle_item(item: int) -> void:
 
 
 @rpc("any_peer", "reliable")
+func rpc_bot_difficulty(bot_id: int) -> void:
+	var r: Node = _room_of(_sender()) if Net.is_server else null
+	if r != null:
+		r.bot_difficulty(_sender(), bot_id)
+
+
+@rpc("any_peer", "reliable")
 func rpc_rematch() -> void:
 	var r: Node = _room_of(_sender()) if Net.is_server else null
 	if r != null:
@@ -580,10 +590,11 @@ func rpc_abort() -> void:
 
 
 @rpc("any_peer", "reliable")
-func rpc_input(x: int, y: int) -> void:
+func rpc_input(x: int, y: int, x2: int, y2: int) -> void:
 	var r: Node = _room_of(_sender()) if Net.is_server else null
 	if r != null:
-		r.input(_sender(), Vector2i(clampi(x, -1, 1), clampi(y, -1, 1)))
+		r.input(_sender(), Vector2i(clampi(x, -1, 1), clampi(y, -1, 1)),
+			Vector2i(clampi(x2, -1, 1), clampi(y2, -1, 1)))
 
 
 @rpc("any_peer", "reliable")
@@ -707,6 +718,7 @@ func rpc_round_start(n: int, ids: Array, w: Dictionary, countdown: float) -> voi
 	view.my_id = my_id
 	dir_stack.clear()
 	last_dir = Vector2i.ZERO
+	last_dir2 = Vector2i.ZERO
 	_show("game")
 	get_viewport().gui_release_focus()
 	_rebuild_chips(ids)
@@ -972,15 +984,23 @@ func _physics_process(_delta: float) -> void:
 
 func _send_input() -> void:
 	var d := Vector2i.ZERO
+	var d2 := Vector2i.ZERO
 	if not dir_stack.is_empty():
 		d = dir_stack.back()
+		# outra direção ainda segurada, de outro eixo: o servidor usa quando d está bloqueada
+		for i in range(dir_stack.size() - 2, -1, -1):
+			var o: Vector2i = dir_stack[i]
+			if o.x != 0 and d.x == 0 or o.y != 0 and d.y == 0:
+				d2 = o
+				break
 	if d == Vector2i.ZERO and touch.visible:
 		d = touch.dir
 	if d == Vector2i.ZERO:
 		d = _joy_dir()
-	if d != last_dir:
+	if d != last_dir or d2 != last_dir2:
 		last_dir = d
-		_to_server(&"rpc_input", [d.x, d.y])
+		last_dir2 = d2
+		_to_server(&"rpc_input", [d.x, d.y, d2.x, d2.y])
 
 
 func _joy_dir() -> Vector2i:
@@ -1937,6 +1957,19 @@ func _refresh_lobby() -> void:
 		sw.size_flags_vertical = Control.SIZE_SHRINK_CENTER
 		hb.add_child(sw)
 		hb.add_child(MenuStyle.label(String(e[1]).to_upper(), 20))
+		if e[3]:
+			# dificuldade do bot: o líder clica para trocar (Fácil -> Normal -> Difícil)
+			var lvl := int(e[4]) if e.size() > 4 else 1
+			var db := MenuStyle.DvrButton.new(BOT_LEVELS[lvl], 14, false, BOT_LEVEL_COLORS[lvl])
+			db.focus_mode = Control.FOCUS_NONE
+			db.custom_minimum_size.x = 92
+			db.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+			db.tooltip_text = "Dificuldade do bot (clique para trocar)"
+			var bot_id: int = e[0]
+			db.pressed.connect(func(): _to_server(&"rpc_bot_difficulty", [bot_id]))
+			db.disabled = my_id != cl_leader
+			db.add_theme_color_override("font_disabled_color", BOT_LEVEL_COLORS[lvl])
+			hb.add_child(db)
 		if e[0] == cl_leader:
 			hb.add_child(MenuStyle.label("LÍDER", 15, MenuStyle.AMBER, 4))
 		if e[0] == my_id:
