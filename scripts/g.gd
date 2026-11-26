@@ -8,6 +8,10 @@ const H := 13             # altura da arena em tiles (inclui bordas)
 const MAX_PLAYERS := 8
 const MAX_ROOMS := 8        # salas abertas ao mesmo tempo no servidor
 const DEFAULT_PORT := 9080
+# versão do protocolo de rede: AUMENTE sempre que mudar RPCs ou o formato do snapshot.
+# Cliente com versão diferente do servidor (aba aberta antes de atualizar) é recusado,
+# em vez de entrar na sala e decodificar o snapshot errado.
+const PROTOCOL := 1
 
 # ---------------------------------------------------------------- tiles
 const T_EMPTY := 0
