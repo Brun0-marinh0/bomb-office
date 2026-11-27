@@ -147,7 +147,9 @@ numa VPS com TLS (`--cert=fullchain.pem --key=privkey.pem` ativa `wss://`). O li
 
 ## Regras
 
-- Arena 17x13 com pilares indestrutíveis e blocos destrutíveis aleatórios; cada jogador começa num canto ou no meio de um lado (até 8).
+- Arena com pilares indestrutíveis e blocos destrutíveis aleatórios; cada jogador começa num canto ou no meio de um lado (até 8).
+  O tamanho muda a cada rodada com a quantidade de jogadores (bots contam): 1–2 → 13x11, 3–4 → 17x13, 5–6 → 19x15, 7–8 → 21x17 (`MAP_SIZES` em `scripts/g.gd`).
+- Quem entra na sala com a partida em andamento assiste a rodada atual (aparece em "ENTRARAM:", ao lado da arena) e joga a partir da próxima rodada, com 0 vitórias.
 - Bomba explode em cruz após 2,5 s; o fogo para no primeiro bloco destrutível (e o destrói), destrói itens e detona outras bombas em cadeia.
 - Começa com 1 bomba e fogo 2. Não dá para atravessar bombas (exceto a que você acabou de soltar).
 - Ao morrer, os itens coletados se espalham pela arena.

@@ -9,7 +9,7 @@ extends RefCounted
 ##   jogador (~19 B), bomba (~13 B)
 ##
 ## decode() devolve o mesmo Array de sempre para o resto do jogo:
-##   [time_left, tiles, flames, items, players, bombs, sudden]
+##   [time_left, tiles, flames, items, players, bombs, sudden, largura, altura]
 
 const G = preload("res://scripts/g.gd")
 
@@ -36,6 +36,8 @@ static func encode(ms: int, s: Array, with_map: bool) -> PackedByteArray:
 	b.put_float(float(s[0]))
 	b.put_u8(flags)
 	if with_map:
+		b.put_u8(int(s[7]))    # largura e altura do mapa (mudam com a quantidade de jogadores)
+		b.put_u8(int(s[8]))
 		b.put_data(s[1])
 		b.put_data(s[3])
 	if has_fire:
@@ -69,19 +71,26 @@ static func encode(ms: int, s: Array, with_map: bool) -> PackedByteArray:
 	return b.data_array
 
 
-## map = [tiles, items] do último mapa recebido (atualizado aqui quando o snapshot traz o mapa).
-## Retorna [ms, snapshot] ou [] se ainda não chegou nenhum mapa.
+## map = [tiles, items, largura, altura] do último mapa recebido (atualizado aqui quando o
+## snapshot traz o mapa). Retorna [ms, snapshot] ou [] se ainda não chegou nenhum mapa.
 static func decode(data: PackedByteArray, map: Array) -> Array:
 	var b := StreamPeerBuffer.new()
 	b.data_array = data
-	var n := G.W * G.H
 	var ms := b.get_u32()
 	var time_left := b.get_float()
 	var flags := b.get_u8()
+	if map.size() < 4:
+		map.resize(4)
+		map[2] = 0
+		map[3] = 0
 	if flags & F_MAP:
-		map[0] = b.get_data(n)[1]
-		map[1] = b.get_data(n)[1]
-	if (map[0] as PackedByteArray).size() != n:
+		map[2] = b.get_u8()
+		map[3] = b.get_u8()
+		var mn: int = map[2] * map[3]
+		map[0] = b.get_data(mn)[1]
+		map[1] = b.get_data(mn)[1]
+	var n: int = int(map[2]) * int(map[3])
+	if n == 0 or not (map[0] is PackedByteArray) or (map[0] as PackedByteArray).size() != n:
 		return []
 	var fl := PackedByteArray()
 	fl.resize(n)
@@ -117,7 +126,7 @@ static func decode(data: PackedByteArray, map: Array) -> Array:
 		var kind := b.get_u8()
 		var frac := b.get_u8() / 255.0
 		bl.append([id, x, y, z, kind, frac])
-	return [ms, [time_left, map[0], fl, map[1], pl, bl, (flags & F_SUDDEN) != 0]]
+	return [ms, [time_left, map[0], fl, map[1], pl, bl, (flags & F_SUDDEN) != 0, map[2], map[3]]]
 
 
 static func _fx(v) -> int:

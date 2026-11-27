@@ -13,6 +13,8 @@ const INTERP_DELAY := 0.1
 const SNAP_JUMP := 1.5    # salto maior que isso (em casas) não é interpolado: teletransporta
 
 var has_data := false
+var mw := G.W       # tamanho do mapa da rodada (vem no snapshot; muda com a quantidade de jogadores)
+var mh := G.H
 var tiles := PackedByteArray()
 var flames := PackedByteArray()
 var items := PackedByteArray()
@@ -111,6 +113,8 @@ func push_snapshot(ms: int, s: Array) -> void:
 func _apply(entry: Array) -> void:
 	_cur_ts = entry[0]
 	var s: Array = entry[1]
+	mw = int(s[7])
+	mh = int(s[8])
 	tiles = s[1]
 	flames = s[2]
 	items = s[3]
@@ -250,18 +254,18 @@ func _process(dt: float) -> void:
 
 
 func _is_edge(x: int, y: int) -> bool:
-	return x == 0 or y == 0 or x == G.W - 1 or y == G.H - 1
+	return x == 0 or y == 0 or x == mw - 1 or y == mh - 1
 
 
 ## Borda do escritório: parede alta em cima (com decorações), parede fina nos lados e embaixo.
 ## As partes transparentes dos sprites deixam ver o fundo, fora da sala.
 func _draw_wall(ci: CanvasItem, x: int, y: int, r: Rect2) -> void:
-	if y == 0 or y == G.H - 1:
-		var tex := Sprites.tex("officeWall/" + (WALL_DECOR.get(x, "wall_plain") if y == 0 else "wall_bottom"))
+	if y == 0 or y == mh - 1:
+		var tex := Sprites.tex("officeWall/" + (WALL_DECOR.get(x - (mw - G.W) / 2, "wall_plain") if y == 0 else "wall_bottom"))
 		# nos cantos só o pedaço que encontra a parede lateral (que tem 7 px de espessura)
 		if x == 0:
 			ci.draw_texture_rect_region(tex, Rect2(r.position + Vector2(25, 0), Vector2(7, 32)), Rect2(25, 0, 7, 32))
-		elif x == G.W - 1:
+		elif x == mw - 1:
 			ci.draw_texture_rect_region(tex, Rect2(r.position, Vector2(7, 32)), Rect2(0, 0, 7, 32))
 		else:
 			ci.draw_texture_rect(tex, r, false)
@@ -274,7 +278,7 @@ func _draw_wall(ci: CanvasItem, x: int, y: int, r: Rect2) -> void:
 ## Parte fixa da arena (chão, pilares, paredes, blocos caídos), desenhada pela ArenaLayer
 ## só quando o mapa muda — antes eram ~220 sprites redesenhados a cada quadro.
 func _draw_static(ci: CanvasItem) -> void:
-	if not has_data or tiles.size() != G.W * G.H:
+	if not has_data or tiles.size() != mw * mh:
 		return
 	var T := float(G.TILE)
 	var floor_a := Sprites.tex("floor")
@@ -282,10 +286,10 @@ func _draw_static(ci: CanvasItem) -> void:
 	var hard := Sprites.tex("hard")
 	var fallen := Sprites.tex("fallen")
 	var use_wall := Sprites.is_custom("officeWall/wall_plain")
-	for y in G.H:
-		for x in G.W:
+	for y in mh:
+		for x in mw:
 			var r := Rect2(x * T, y * T, T, T)
-			var tt: int = tiles[y * G.W + x]
+			var tt: int = tiles[y * mw + x]
 			if tt == G.T_HARD and use_wall and _is_edge(x, y):
 				_draw_wall(ci, x, y, r)
 			elif tt == G.T_HARD:
@@ -314,9 +318,9 @@ func _draw() -> void:
 	var flame := Sprites.tex("flame")
 
 	# ---- arena: só o que muda (mesas animadas, blocos queimando, itens); o resto está na ArenaLayer
-	for y in G.H:
-		for x in G.W:
-			var k := y * G.W + x
+	for y in mh:
+		for x in mw:
+			var k := y * mw + x
 			var tt: int = tiles[k]
 			var r := Rect2(x * T, y * T, T, T)
 			if tt == G.T_SOFT or tt == G.T_BURNING:
@@ -385,8 +389,8 @@ func _draw() -> void:
 	var fa := 0.85 + 0.15 * sin(t * 30.0)
 	for k in flames.size():
 		if flames[k] != 0:
-			var x := k % G.W
-			var y := k / G.W
+			var x := k % mw
+			var y := k / mw
 			draw_texture_rect(flame, Rect2(x * T, y * T, T, T), false, Color(1, 1, 1, fa))
 
 	# ---- jogadores

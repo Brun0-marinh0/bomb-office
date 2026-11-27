@@ -3,15 +3,18 @@ extends RefCounted
 ## Use com: const G = preload("res://scripts/g.gd")
 
 const TILE := 32          # tamanho do sprite/tile em pixels
-const W := 17             # largura da arena em tiles (inclui bordas)
-const H := 13             # altura da arena em tiles (inclui bordas)
+const W := 17             # largura da arena padrão em tiles (inclui bordas)
+const H := 13             # altura da arena padrão em tiles (inclui bordas)
+# o mapa de cada rodada se ajusta à quantidade de jogadores (bots contam): até N jogadores -> [largura, altura]
+# (sempre ímpar: pilares nas casas pares)
+const MAP_SIZES := [[2, 13, 11], [4, 17, 13], [6, 19, 15], [8, 21, 17]]
 const MAX_PLAYERS := 8
 const MAX_ROOMS := 8        # salas abertas ao mesmo tempo no servidor
 const DEFAULT_PORT := 9080
 # versão do protocolo de rede: AUMENTE sempre que mudar RPCs ou o formato do snapshot.
 # Cliente com versão diferente do servidor (aba aberta antes de atualizar) é recusado,
 # em vez de entrar na sala e decodificar o snapshot errado.
-const PROTOCOL := 3
+const PROTOCOL := 4
 
 # ---------------------------------------------------------------- tiles
 const T_EMPTY := 0
@@ -138,19 +141,32 @@ static func player_color_name(i: int) -> String:
 	var names: Array = PLAYER_COLOR_NAMES_CB if colorblind else PLAYER_COLOR_NAMES
 	return names[posmod(i, names.size())]
 
-# 4 cantos primeiro, depois o meio de cada lado
-const SPAWNS := [Vector2i(1, 1), Vector2i(15, 11), Vector2i(15, 1), Vector2i(1, 11),
-	Vector2i(8, 1), Vector2i(8, 11), Vector2i(1, 6), Vector2i(15, 6)]
-
 const DIRS := [Vector2i(0, -1), Vector2i(0, 1), Vector2i(-1, 0), Vector2i(1, 0)]
 
 
-static func idx(c: Vector2i) -> int:
-	return c.y * W + c.x
+## Tamanho do mapa para essa quantidade de jogadores.
+static func map_size(players: int) -> Vector2i:
+	for e in MAP_SIZES:
+		if players <= int(e[0]):
+			return Vector2i(e[1], e[2])
+	var last: Array = MAP_SIZES[MAP_SIZES.size() - 1]
+	return Vector2i(last[1], last[2])
 
 
-static func in_bounds(c: Vector2i) -> bool:
-	return c.x >= 0 and c.y >= 0 and c.x < W and c.y < H
+## Pontos de nascimento num mapa w x h: 4 cantos primeiro, depois o meio de cada lado.
+static func spawns(w: int, h: int) -> Array:
+	var r := w - 2
+	var b := h - 2
+	return [Vector2i(1, 1), Vector2i(r, b), Vector2i(r, 1), Vector2i(1, b),
+		Vector2i(w / 2, 1), Vector2i(w / 2, b), Vector2i(1, h / 2), Vector2i(r, h / 2)]
+
+
+static func idx(c: Vector2i, w := W) -> int:
+	return c.y * w + c.x
+
+
+static func in_bounds(c: Vector2i, w := W, h := H) -> bool:
+	return c.x >= 0 and c.y >= 0 and c.x < w and c.y < h
 
 
 static func cell_of(p: Vector2) -> Vector2i:
@@ -161,19 +177,19 @@ static func center_of(c: Vector2i) -> Vector2:
 	return Vector2(c) + Vector2(0.5, 0.5)
 
 
-static func is_pillar(c: Vector2i) -> bool:
-	if c.x == 0 or c.y == 0 or c.x == W - 1 or c.y == H - 1:
+static func is_pillar(c: Vector2i, w := W, h := H) -> bool:
+	if c.x == 0 or c.y == 0 or c.x == w - 1 or c.y == h - 1:
 		return true
 	return c.x % 2 == 0 and c.y % 2 == 0
 
 
 ## Ordem em que os blocos caem na morte súbita: espiral de fora para dentro.
-static func spiral_cells() -> Array:
+static func spiral_cells(w := W, h := H) -> Array:
 	var res: Array = []
 	var left := 1
 	var top := 1
-	var right := W - 2
-	var bottom := H - 2
+	var right := w - 2
+	var bottom := h - 2
 	while left <= right and top <= bottom:
 		for x in range(left, right + 1):
 			res.append(Vector2i(x, top))
