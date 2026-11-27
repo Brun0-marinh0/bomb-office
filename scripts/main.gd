@@ -70,7 +70,7 @@ var last_dir := Vector2i.ZERO
 var last_dir2 := Vector2i.ZERO
 var auto_started := false
 var _snap_count := 0
-var cl_map: Array = [PackedByteArray(), PackedByteArray()]   # último mapa recebido [blocos, itens]
+var cl_map: Array = [PackedByteArray(), PackedByteArray(), 0, 0]   # último mapa recebido [blocos, itens, largura, altura]
 var ping_ms := 0
 var _stat_secs := 0      # --net-stats
 var _stat_snaps := 0
@@ -129,6 +129,8 @@ var hud_stats: Label
 var hud_items: HudItemList
 var hud_items_layer: CanvasLayer
 var hud_ping: Label
+var hud_joined: PanelContainer   # canto esquerdo: quem entrou na sala e joga na próxima rodada
+var hud_joined_list: VBoxContainer
 var hud_abort: Button
 var abort_dialog: ConfirmationDialog
 var overlay: CenterContainer
@@ -633,8 +635,9 @@ func rpc_lobby(list: Array, leader: int, st: String, w: int, t: int, share: Stri
 		_show("lobby")
 	elif screen != "game":
 		_show("game")
-		_show_overlay("Partida em andamento.\nVocê entra na próxima!", 3.0)
+		_show_overlay("Partida em andamento.\nVocê entra na próxima rodada!", 3.0)
 	_refresh_lobby()
+	_refresh_joined()
 	if args.has("autostart") and not auto_started and leader == my_id and st == "lobby" \
 			and list.size() >= int(args.get("autostart-min", "1")):
 		auto_started = true
@@ -713,7 +716,7 @@ func rpc_round_start(n: int, ids: Array, w: Dictionary, countdown: float) -> voi
 	cl_state = "round"
 	results.visible = false
 	_round_start_ms = Time.get_ticks_msec() + int(countdown * 1000.0)
-	cl_map = [PackedByteArray(), PackedByteArray()]
+	cl_map = [PackedByteArray(), PackedByteArray(), 0, 0]
 	view.reset()
 	view.my_id = my_id
 	dir_stack.clear()
@@ -848,6 +851,7 @@ func rpc_match_end(winner: int, w: Dictionary, stats: Array, secs: float) -> voi
 		return
 	cl_wins = w
 	cl_state = "match_end"
+	_refresh_joined()
 	view.winner = winner
 	overlay.visible = false
 	var names := {}
@@ -950,6 +954,7 @@ func _on_leave_room_pressed() -> void:
 func _reset_room_state() -> void:
 	cl_players = []
 	cl_roster = []
+	chip_ids = []
 	cl_leader = 0
 	cl_room_name = ""
 	cl_room_code = ""
@@ -1100,7 +1105,7 @@ func _process(_dt: float) -> void:
 	var vs := get_viewport().get_visible_rect().size
 	var top := 50.0
 	var bottom := 40.0
-	var map := Vector2(G.W * G.TILE, G.H * G.TILE)
+	var map := Vector2(view.mw * G.TILE, view.mh * G.TILE)
 	var s := minf((vs.x - 16.0) / map.x, (vs.y - top - bottom) / map.y)
 	if s >= 1.0:
 		s = floorf(s * 4.0) / 4.0
@@ -1113,6 +1118,14 @@ func _process(_dt: float) -> void:
 	hud_items.offset_left = x0
 	hud_items.offset_right = x0 + panel_w
 	hud_items.offset_top = view.position.y
+	# painel "ENTRARAM:" espelhado no lado esquerdo da arena (sem sobra: encostado na borda da tela)
+	if hud_joined.visible:
+		var jw := hud_joined.get_combined_minimum_size().x
+		var jx := maxf(view.position.x - jw - 6.0, 10.0)
+		# o "● REC" fica no canto (até x ~120, y ~100): se o painel chegar lá, desce um pouco
+		var jy := view.position.y if jx > 120.0 else maxf(view.position.y, 112.0)
+		hud_joined.position = Vector2(jx, jy)
+		hud_joined.size = hud_joined.get_combined_minimum_size()
 
 
 # =================================================================== UI
@@ -1816,6 +1829,21 @@ func _build_hud() -> void:
 	hud_ping.offset_bottom = -6
 	hud_ping.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
 	hud.add_child(hud_ping)
+	# quem entrou durante a rodada: encostado no lado esquerdo da arena, no mesmo estilo e na
+	# mesma camada do "SEUS ITENS" (dentro do olho-de-peixe); some quando todos estão jogando
+	hud_joined = PanelContainer.new()
+	hud_joined.set_anchors_preset(Control.PRESET_TOP_LEFT)
+	hud_joined.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	var jsb := MenuStyle.box(Color(0.0, 0.0, 0.0, 0.55), Color(0, 0, 0, 0), 0)
+	for side in [SIDE_LEFT, SIDE_RIGHT, SIDE_TOP, SIDE_BOTTOM]:
+		jsb.set_content_margin(side, 10)
+	hud_joined.add_theme_stylebox_override("panel", jsb)
+	hud_joined.visible = false
+	hud_items_layer.add_child(hud_joined)
+	hud_joined_list = VBoxContainer.new()
+	hud_joined_list.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	hud_joined_list.add_theme_constant_override("separation", 2)
+	hud_joined.add_child(hud_joined_list)
 
 
 func _build_overlay() -> void:
@@ -2037,6 +2065,31 @@ func _on_copy_pressed() -> void:
 	copy_btn.text = "COPIAR LINK"
 
 
+## Canto esquerdo durante a partida: quem entrou na sala e ainda não está jogando
+## (entra na próxima rodada). Some quando todos da sala estão no jogo.
+func _refresh_joined() -> void:
+	if hud_joined == null:
+		return
+	var waiting: Array = []
+	# chip_ids = quem está na rodada (vem do rpc_round_start ou, para quem acabou de entrar, do snapshot)
+	if cl_state != "lobby" and cl_state != "match_end" and not chip_ids.is_empty():
+		for e in cl_players:
+			if not chip_ids.has(e[0]):
+				waiting.append(e)
+	hud_joined.visible = not waiting.is_empty()
+	for c in hud_joined_list.get_children():
+		c.queue_free()
+	if waiting.is_empty():
+		return
+	var title := MenuStyle.label("ENTRARAM:", 16, MenuStyle.AMBER, 3)
+	hud_joined_list.add_child(title)
+	for e in waiting:
+		var txt := "> %s" % str(e[1]).to_upper() + (" (VOCÊ)" if e[0] == my_id else "")
+		hud_joined_list.add_child(MenuStyle.label(txt, 15, G.player_color(int(e[2])), 3))
+	hud_joined_list.add_child(MenuStyle.label("JOGAM NA PRÓXIMA RODADA", 13, MenuStyle.MUTED, 3))
+	hud_joined.reset_size()
+
+
 func _rebuild_chips(ids: Array) -> void:
 	chip_ids = ids.duplicate()
 	for c in hud_chips.get_children():
@@ -2047,6 +2100,7 @@ func _rebuild_chips(ids: Array) -> void:
 		hud_chips.add_child(chip)
 		chip.set_state(_name_of(id), true, _color_of(id))
 		chips[id] = chip
+	_refresh_joined()
 
 
 func _update_hud(s: Array) -> void:
@@ -2067,7 +2121,7 @@ func _update_hud(s: Array) -> void:
 			mine = e
 	hud_abort.visible = my_id == cl_leader
 	if mine == null:
-		hud_stats.text = "Assistindo — você entra na próxima partida."
+		hud_stats.text = "Assistindo — você entra na próxima rodada."
 		hud_items.visible = false
 		hud_items.clear_now()
 		return

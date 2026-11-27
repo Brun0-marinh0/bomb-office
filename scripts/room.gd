@@ -323,6 +323,13 @@ func start_match() -> void:
 
 func _start_round() -> void:
 	roster = roster.filter(func(id): return lobby.has(id))
+	# quem entrou na sala durante a rodada anterior joga a partir desta (o mapa cresce junto)
+	for id in order:
+		if not roster.has(id) and roster.size() < G.MAX_PLAYERS:
+			roster.append(id)
+			wins[id] = 0
+			stats[id] = {"kills": 0, "deaths": 0, "suicides": 0, "items": 0}
+			log_line("%s entra na rodada %d" % [lobby[id].name, round_no + 1])
 	if roster.is_empty() or (not test_mode and _humans(roster) == 0):
 		_back_to_lobby()
 		return

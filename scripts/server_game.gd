@@ -32,12 +32,20 @@ var _next_bomb_id := 1
 var _tick_count := 0
 var _danger := PackedFloat32Array()
 var _danger_frame := -1
+# tamanho do mapa desta rodada (cada sala tem o seu; muda com a quantidade de jogadores)
+var mw := G.W
+var mh := G.H
+var sudden_step := G.SUDDEN_STEP   # mapa maior: blocos caem mais rápido para fechar no mesmo tempo
 
 
 # ====================================================================== setup
 func start_round(roster: Array, round_time: float) -> void:
 	rng.randomize()
-	var n := G.W * G.H
+	var size := G.map_size(roster.size())
+	mw = size.x
+	mh = size.y
+	var n := mw * mh
+	sudden_step = G.SUDDEN_STEP * float((G.W - 2) * (G.H - 2)) / float((mw - 2) * (mh - 2))
 	tiles.resize(n)
 	tiles.fill(G.T_EMPTY)
 	items.resize(n)
@@ -55,17 +63,27 @@ func start_round(roster: Array, round_time: float) -> void:
 	ending = false
 	end_timer = 0.0
 	sudden_active = false
-	sudden_cells = G.spiral_cells()
+	sudden_cells = G.spiral_cells(mw, mh)
 	sudden_index = 0
 	sudden_timer = 0.0
 	_danger_frame = -1
-	var spawns: Array = []
-	for i in roster.size():
-		spawns.append(G.SPAWNS[i])
+	var spawns: Array = G.spawns(mw, mh).slice(0, roster.size())
 	_build_map(spawns)
 	for i in roster.size():
 		var r: Dictionary = roster[i]
 		players[r.id] = _new_player(r, spawns[i])
+
+
+func _idx(c: Vector2i) -> int:
+	return c.y * mw + c.x
+
+
+func _in_bounds(c: Vector2i) -> bool:
+	return c.x >= 0 and c.y >= 0 and c.x < mw and c.y < mh
+
+
+func _is_pillar(c: Vector2i) -> bool:
+	return G.is_pillar(c, mw, mh)
 
 
 func _new_player(r: Dictionary, spawn: Vector2i) -> Dictionary:
@@ -94,11 +112,11 @@ func _build_map(spawns: Array) -> void:
 	for i in range(1, G.ITEM_COUNT):
 		if not _is_blocked(i):
 			total += G.ITEM_WEIGHTS[i]
-	for y in G.H:
-		for x in G.W:
+	for y in mh:
+		for x in mw:
 			var c := Vector2i(x, y)
-			var k: int = G.idx(c)
-			if G.is_pillar(c):
+			var k: int = _idx(c)
+			if _is_pillar(c):
 				tiles[k] = G.T_HARD
 			elif not safe.has(c) and rng.randf() < G.SOFT_DENSITY:
 				tiles[k] = G.T_SOFT
@@ -207,9 +225,9 @@ func _inside_block(p: Dictionary) -> bool:
 	for dy in range(-1, 2):
 		for dx in range(-1, 2):
 			var n: Vector2i = c + Vector2i(dx, dy)
-			if not G.in_bounds(n):
+			if not _in_bounds(n):
 				continue
-			var t: int = tiles[G.idx(n)]
+			var t: int = tiles[_idx(n)]
 			if (t == G.T_SOFT or t == G.T_BURNING) and _overlaps(p.pos, G.center_of(n)):
 				return true
 	return false
@@ -225,9 +243,9 @@ func _speed(p: Dictionary) -> float:
 
 
 func _passable(p: Dictionary, c: Vector2i) -> bool:
-	if not G.in_bounds(c):
+	if not _in_bounds(c):
 		return false
-	var t: int = tiles[G.idx(c)]
+	var t: int = tiles[_idx(c)]
 	if t == G.T_HARD or t == G.T_FALLEN:
 		return false
 	if (t == G.T_SOFT or t == G.T_BURNING) and not p.wall_pass:
@@ -341,7 +359,7 @@ func _try_place_bomb(p: Dictionary, allow_line: bool) -> void:
 			_place_line(p, cell)
 			game_event.emit("placed", [p.id])
 		return
-	if tiles[G.idx(cell)] != G.T_EMPTY:
+	if tiles[_idx(cell)] != G.T_EMPTY:
 		return
 	if _count_bombs(p.id) >= p.bombs_max:
 		return
@@ -378,7 +396,7 @@ func _place_line(p: Dictionary, cell: Vector2i) -> void:
 	var d: Vector2i = p.facing
 	var c: Vector2i = cell + d
 	while _count_bombs(p.id) < p.bombs_max:
-		if not G.in_bounds(c) or tiles[G.idx(c)] != G.T_EMPTY or _bomb_at(c) != null or _player_on(c):
+		if not _in_bounds(c) or tiles[_idx(c)] != G.T_EMPTY or _bomb_at(c) != null or _player_on(c):
 			break
 		_spawn_bomb(p, c)
 		c += d
@@ -430,9 +448,9 @@ func _launch(b: Dictionary, d: Vector2i, dist: int) -> void:
 
 
 func _cell_blocked_for_bomb(c: Vector2i) -> bool:
-	if not G.in_bounds(c):
+	if not _in_bounds(c):
 		return true
-	if tiles[G.idx(c)] != G.T_EMPTY:
+	if tiles[_idx(c)] != G.T_EMPTY:
 		return true
 	if _bomb_at(c) != null:
 		return true
@@ -441,7 +459,7 @@ func _cell_blocked_for_bomb(c: Vector2i) -> bool:
 
 ## Arremesso dá a volta na arena (sai de um lado, entra do outro).
 func _wrap(v: Vector2) -> Vector2:
-	return Vector2(1.0 + fposmod(v.x - 1.0, float(G.W - 2)), 1.0 + fposmod(v.y - 1.0, float(G.H - 2)))
+	return Vector2(1.0 + fposmod(v.x - 1.0, float(mw - 2)), 1.0 + fposmod(v.y - 1.0, float(mh - 2)))
 
 
 func _update_bombs(dt: float) -> void:
@@ -457,7 +475,7 @@ func _update_bombs(dt: float) -> void:
 			continue
 		if b.move != Vector2i.ZERO:
 			_slide(b, dt)
-		if flames[G.idx(b.cell)] > 0.0:
+		if flames[_idx(b.cell)] > 0.0:
 			b.remote = false
 			b.fuse = minf(b.fuse, G.CHAIN_DELAY)
 		if not b.remote:
@@ -518,16 +536,16 @@ func _explode(b: Dictionary) -> void:
 			bombs.remove_at(i)
 			break
 	var origin: Vector2i = b.cell
-	var ok: int = G.idx(origin)
+	var ok: int = _idx(origin)
 	flames[ok] = G.FLAME_TIME
 	flame_owner[ok] = b.owner
 	items[ok] = G.I_NONE
 	for d in G.DIRS:
 		for i in range(1, int(b.range) + 1):
 			var c: Vector2i = origin + d * i
-			if not G.in_bounds(c):
+			if not _in_bounds(c):
 				break
-			var k: int = G.idx(c)
+			var k: int = _idx(c)
 			var t: int = tiles[k]
 			if t == G.T_HARD or t == G.T_FALLEN:
 				break
@@ -574,7 +592,7 @@ func _check_hits() -> void:
 	for p in players.values():
 		if not p.alive:
 			continue
-		var k: int = G.idx(G.cell_of(p.pos))
+		var k: int = _idx(G.cell_of(p.pos))
 		if flames[k] > 0.0 or tiles[k] == G.T_BURNING:
 			_hurt(p, flame_owner[k])
 
@@ -615,10 +633,10 @@ func _scatter(list: Array) -> void:
 	var free: Array = []
 	var reach := _reachable_cells()
 	var doomed := _doomed_cells()
-	for y in G.H:
-		for x in G.W:
+	for y in mh:
+		for x in mw:
 			var c := Vector2i(x, y)
-			var k: int = G.idx(c)
+			var k: int = _idx(c)
 			# só onde alguém ainda consegue chegar e a parede da morte súbita não vai cair logo
 			if tiles[k] == G.T_EMPTY and items[k] == G.I_NONE and flames[k] <= 0.0 \
 					and _bomb_at(c) == null and not _player_on(c) \
@@ -626,14 +644,14 @@ func _scatter(list: Array) -> void:
 				free.append(c)
 	free.shuffle()
 	for i in mini(list.size(), free.size()):
-		items[G.idx(free[i])] = list[i]
+		items[_idx(free[i])] = list[i]
 
 
 func _check_pickups() -> void:
 	for p in players.values():
 		if not p.alive:
 			continue
-		var k: int = G.idx(G.cell_of(p.pos))
+		var k: int = _idx(G.cell_of(p.pos))
 		var it: int = items[k]
 		if it != G.I_NONE and tiles[k] == G.T_EMPTY:
 			items[k] = G.I_NONE
@@ -706,14 +724,14 @@ func _update_sudden(dt: float) -> void:
 	while sudden_timer <= 0.0 and sudden_index < sudden_cells.size():
 		var c: Vector2i = sudden_cells[sudden_index]
 		sudden_index += 1
-		if tiles[G.idx(c)] == G.T_HARD:
+		if tiles[_idx(c)] == G.T_HARD:
 			continue
 		_drop_block(c)
-		sudden_timer += G.SUDDEN_STEP
+		sudden_timer += sudden_step
 
 
 func _drop_block(c: Vector2i) -> void:
-	var k: int = G.idx(c)
+	var k: int = _idx(c)
 	tiles[k] = G.T_FALLEN
 	items[k] = G.I_NONE
 	flames[k] = 0.0
@@ -743,9 +761,9 @@ func _reachable_cells() -> Dictionary:
 		var c: Vector2i = q.pop_back()
 		for d in G.DIRS:
 			var n: Vector2i = c + d
-			if seen.has(n) or not G.in_bounds(n):
+			if seen.has(n) or not _in_bounds(n):
 				continue
-			var t: int = tiles[G.idx(n)]
+			var t: int = tiles[_idx(n)]
 			if t == G.T_HARD or t == G.T_FALLEN:
 				continue
 			seen[n] = true
@@ -758,7 +776,7 @@ func _doomed_cells() -> Dictionary:
 	var res := {}
 	if not sudden_active:
 		return res
-	for i in range(sudden_index, mini(sudden_index + int(10.0 / G.SUDDEN_STEP), sudden_cells.size())):
+	for i in range(sudden_index, mini(sudden_index + int(10.0 / sudden_step), sudden_cells.size())):
 		res[sudden_cells[i]] = true
 	return res
 
@@ -769,7 +787,7 @@ func _prune_unreachable_items() -> void:
 	if reach.is_empty():
 		return
 	for k in items.size():
-		if items[k] != G.I_NONE and not reach.has(Vector2i(k % G.W, k / G.W)):
+		if items[k] != G.I_NONE and not reach.has(Vector2i(k % mw, k / mw)):
 			items[k] = G.I_NONE
 
 
@@ -796,7 +814,7 @@ func _check_end(dt: float) -> void:
 
 # ====================================================================== snapshot
 func snapshot() -> Array:
-	var n := G.W * G.H
+	var n := mw * mh
 	var vis_items := PackedByteArray()
 	vis_items.resize(n)
 	var fl := PackedByteArray()
@@ -822,7 +840,7 @@ func snapshot() -> Array:
 			kind |= 4
 		var frac := 1.0 if b.remote else clampf(b.fuse / G.FUSE, 0.0, 1.0)
 		bl.append([b.id, b.pos.x, b.pos.y, z, kind, frac])
-	return [time_left, tiles, fl, vis_items, pl, bl, sudden_active]
+	return [time_left, tiles, fl, vis_items, pl, bl, sudden_active, mw, mh]
 
 
 func _bits(p: Dictionary) -> int:
@@ -848,9 +866,9 @@ func _blast_cells(origin: Vector2i, rng_fire: int, pierce: bool) -> Array:
 	for d in G.DIRS:
 		for i in range(1, rng_fire + 1):
 			var c: Vector2i = origin + d * i
-			if not G.in_bounds(c):
+			if not _in_bounds(c):
 				break
-			var t: int = tiles[G.idx(c)]
+			var t: int = tiles[_idx(c)]
 			if t == G.T_HARD or t == G.T_FALLEN:
 				break
 			if t == G.T_SOFT or t == G.T_BURNING:
@@ -868,7 +886,7 @@ func _danger_map() -> PackedFloat32Array:
 	if _danger_frame == _tick_count:
 		return _danger
 	_danger_frame = _tick_count
-	_danger.resize(G.W * G.H)
+	_danger.resize(mw * mh)
 	_danger.fill(INF_T)
 	var times := {}
 	for b in bombs:
@@ -886,7 +904,7 @@ func _danger_map() -> PackedFloat32Array:
 		if b.fly:
 			continue
 		for c in _blast_cells(b.cell, b.range, b.pierce):
-			var k: int = G.idx(c)
+			var k: int = _idx(c)
 			_danger[k] = minf(_danger[k], times[b.id])
 	for k in _danger.size():
 		if flames[k] > 0.0 or tiles[k] == G.T_BURNING:
@@ -898,13 +916,13 @@ func _danger_map() -> PackedFloat32Array:
 	if fall_t < SUDDEN_LOOKAHEAD:
 		for i in range(sudden_index, sudden_cells.size()):
 			var c: Vector2i = sudden_cells[i]
-			if tiles[G.idx(c)] == G.T_HARD:
+			if tiles[_idx(c)] == G.T_HARD:
 				continue
 			if fall_t >= SUDDEN_LOOKAHEAD:
 				break
-			var k := G.idx(c)
+			var k := _idx(c)
 			_danger[k] = minf(_danger[k], maxf(fall_t, 0.0))
-			fall_t += G.SUDDEN_STEP
+			fall_t += sudden_step
 	return _danger
 
 
@@ -931,7 +949,7 @@ func _bot_think(p: Dictionary, dt: float) -> void:
 	p.ai_soft = float(p.get("ai_soft", 0.0)) - dt
 	var cell: Vector2i = G.cell_of(p.pos)
 	var danger := _danger_map()
-	var in_danger := danger[G.idx(cell)] < INF_T
+	var in_danger := danger[_idx(cell)] < INF_T
 	if in_danger:
 		# percebe o perigo com um atraso (Fácil demora mais)
 		p.ai_seen = float(p.get("ai_seen", 0.0)) + dt
@@ -952,7 +970,7 @@ func _bot_think(p: Dictionary, dt: float) -> void:
 func _bot_plan(p: Dictionary, cell: Vector2i, danger: PackedFloat32Array) -> void:
 	var cfg := _ai(p)
 	p.ai_fleeing = false
-	if danger[G.idx(cell)] < INF_T:
+	if danger[_idx(cell)] < INF_T:
 		p.ai_path = _flee_path(p, cell, danger, float(cfg.margin))
 		p.ai_fleeing = true
 		return
@@ -972,8 +990,8 @@ func _bot_plan(p: Dictionary, cell: Vector2i, danger: PackedFloat32Array) -> voi
 		return
 	var path: Array = []
 	# 1) item perto
-	path = _pick(reach, func(c, depth): return depth <= 8 and items[G.idx(c)] != G.I_NONE \
-		and items[G.idx(c)] != G.I_SKULL and tiles[G.idx(c)] == G.T_EMPTY)
+	path = _pick(reach, func(c, depth): return depth <= 8 and items[_idx(c)] != G.I_NONE \
+		and items[_idx(c)] != G.I_SKULL and tiles[_idx(c)] == G.T_EMPTY)
 	# fim de jogo (morte súbita ou só mais um adversário): parte para cima
 	var hunt := float(cfg.hunt)
 	if sudden_active or _alive_count() <= 2:
@@ -1010,7 +1028,7 @@ func _path_safe(p: Dictionary, cell: Vector2i, danger: PackedFloat32Array, margi
 		if c == cell:
 			continue
 		k += 1
-		if not _passable(p, c) or danger[G.idx(c)] < (k + 0.5) / spd + margin:
+		if not _passable(p, c) or danger[_idx(c)] < (k + 0.5) / spd + margin:
 			return false
 	return true
 
@@ -1021,9 +1039,9 @@ func _bomb_targets(p: Dictionary, c: Vector2i) -> Dictionary:
 	for d in G.DIRS:
 		for i in range(1, int(p.fire) + 1):
 			var n: Vector2i = c + d * i
-			if not G.in_bounds(n):
+			if not _in_bounds(n):
 				break
-			var t: int = tiles[G.idx(n)]
+			var t: int = tiles[_idx(n)]
 			if t == G.T_HARD or t == G.T_FALLEN or t == G.T_BURNING:
 				break
 			if t == G.T_SOFT:
@@ -1043,12 +1061,12 @@ func _bomb_targets(p: Dictionary, c: Vector2i) -> Dictionary:
 func _bot_can_escape(p: Dictionary, cell: Vector2i, danger: PackedFloat32Array) -> bool:
 	if p.disease == G.D_CONSTIPATION or _count_bombs(p.id) >= p.bombs_max:
 		return false
-	if _bomb_at(cell) != null or tiles[G.idx(cell)] != G.T_EMPTY:
+	if _bomb_at(cell) != null or tiles[_idx(cell)] != G.T_EMPTY:
 		return false
 	var fuse := G.SHORT_FUSE if p.disease == G.D_SHORT_FUSE else G.FUSE
 	var sim := danger.duplicate()
 	for c in _blast_cells(cell, p.fire, p.pierce):
-		var k: int = G.idx(c)
+		var k: int = _idx(c)
 		sim[k] = minf(sim[k], fuse)
 	# basta chegar numa casa que a própria bomba não pega e que não vai pegar fogo tão cedo
 	var esc := _flee_path(p, cell, sim, float(_ai(p).margin), false, fuse + G.FLAME_TIME + 1.0)
@@ -1066,12 +1084,12 @@ func _flee_path(p: Dictionary, start: Vector2i, danger: PackedFloat32Array, marg
 	var q: Array = [start]
 	var head := 0
 	var best := start
-	var best_v := danger[G.idx(start)]
+	var best_v := danger[_idx(start)]
 	var shared := start    # casa segura que outro bot já escolheu (só se não houver outra)
 	while head < q.size() and head < 220:
 		var c: Vector2i = q[head]
 		head += 1
-		var dz: float = danger[G.idx(c)]
+		var dz: float = danger[_idx(c)]
 		if c != start and dz >= safe_after:
 			if not _taken(p, c):
 				return _rebuild(prev, start, c)
@@ -1086,7 +1104,7 @@ func _flee_path(p: Dictionary, start: Vector2i, danger: PackedFloat32Array, marg
 				continue
 			var k: int = depth[c] + 1
 			# fica na casa n de ~(k-0.5)/v até (k+0.5)/v
-			if danger[G.idx(n)] < (k + 0.5) / spd + margin:
+			if danger[_idx(n)] < (k + 0.5) / spd + margin:
 				continue
 			prev[n] = c
 			depth[n] = k
@@ -1098,11 +1116,11 @@ func _flee_path(p: Dictionary, start: Vector2i, danger: PackedFloat32Array, marg
 	if allow_best:
 		# nada passa na conta do tempo: pelo menos sai para o vizinho menos perigoso
 		var nb := start
-		var nv := danger[G.idx(start)]
+		var nv := danger[_idx(start)]
 		for d in G.DIRS:
 			var n: Vector2i = start + d
-			if _passable(p, n) and danger[G.idx(n)] > nv:
-				nv = danger[G.idx(n)]
+			if _passable(p, n) and danger[_idx(n)] > nv:
+				nv = danger[_idx(n)]
 				nb = n
 		if nb != start:
 			return [nb]
@@ -1123,7 +1141,7 @@ func _reach(p: Dictionary, start: Vector2i, danger: PackedFloat32Array) -> Dicti
 			order.append(c)
 		for d in G.DIRS:
 			var n: Vector2i = c + d
-			if prev.has(n) or not _passable(p, n) or danger[G.idx(n)] < INF_T:
+			if prev.has(n) or not _passable(p, n) or danger[_idx(n)] < INF_T:
 				continue
 			prev[n] = c
 			depth[n] = depth[c] + 1
